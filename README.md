@@ -24,11 +24,25 @@ DSHA 自带的「备份与恢复」目前有个 bug：备份能成功，**恢复
 
 ## 安装
 
+**一条命令**（下载最新版并解压）：
+
 ```bash
-tar -xzf dsh-tools-1.0.0.tar.gz
-cd dsh-tools
-sh install.sh                  # 装到 /usr/local/bin
-sh install.sh --prefix ~/bin   # 或者装到别处
+curl -L https://github.com/sb1145148/dsh-tools/releases/latest/download/dsh-tools-1.0.0.tar.gz \
+  | tar -xz
+cd dsh-tools && sh install.sh
+```
+
+**或者从源码：**
+
+```bash
+git clone https://github.com/sb1145148/dsh-tools
+cd dsh-tools && sh install.sh
+```
+
+**装到别处：**
+
+```bash
+sh install.sh --prefix ~/bin
 ```
 
 只依赖 `sh` / `tar` / `find` / `cp`，不需要 node、python、rsync。
