@@ -1,61 +1,242 @@
 # dsh-tools
 
-两个命令，给 [DSHA](https://github.com/) 做**能真的恢复回来**的备份。
+两个命令，给 DSHA 做**能真的恢复回来**的备份。
 
 ```bash
-dsh-backup                                    # 备份，约 10 秒
-dsh-restore /sdcard/Download/.../xxx.tar.gz   # 还原
+dsh-backup          # 备份，10 秒
+dsh-restore <包>    # 还原
 ```
 
 ---
 
-## 为什么需要它
+## 🚀 最快用法（不用懂任何命令）
 
-DSHA 自带的「备份与恢复」目前有个 bug：备份能成功，**恢复报 `ARCHIVE_LINK_ESCAPE`**。
+**打开 DSHA，把下面这一整段复制，粘进对话框，发送。**
 
-原因是它的 `portable.dshbak` 里保留了 `node_modules` 中指向归档根之外的软链，
-恢复时的安全检查拒绝了这些链接，导致整个还原失败。
+```
+帮我装一下 https://github.com/sb1145148/dsh-tools 这个备份工具，
+装完立刻做一次备份，然后告诉我：
+  1. 备份文件在哪
+  2. 多大
+  3. 有没有报"逃逸软链"
+```
 
-**结果就是换机迁移这条路完全走不通。**
+**AI 会自己下载、安装、跑备份。你只管看结果。**
 
-这个工具在**打包阶段**就把这类链接剔掉，所以恢复能过。
+看到类似这样的输出就成了：
+
+```
+✅ 完成
+   文件: /sdcard/Download/dsh-backup/dsh-backup-20261022-1244.tar.gz
+   大小: 59M
+   条目: 1019
+   软链: 0（逃逸型 0）
+```
 
 ---
 
-## 安装
+## 📥 我下载好了，然后呢
 
-**一条命令**（下载最新版并解压）：
+如果你拿到的是 `dsh-tools-1.0.1.tar.gz`，**最省事的办法还是把上面那段发给 AI**，
+它会帮你解压安装，你不用管路径。
+
+**想自己动手的话，就三步：**
+
+### 第 1 步：解开压缩包
+
+手机上随便一个文件管理器都能解压，解出来是一个叫 `dsh-tools` 的文件夹。
+
+> 解压不了？回到上面「最快用法」，让 AI 做。
+
+### 第 2 步：安装
+
+打开 DSHA 的终端（或者直接让 AI 做），执行：
 
 ```bash
-curl -L https://github.com/sb1145148/dsh-tools/releases/latest/download/dsh-tools-1.0.0.tar.gz \
-  | tar -xz
 cd dsh-tools && sh install.sh
 ```
 
-**或者从源码：**
+**你会看到：**
 
-```bash
-git clone https://github.com/sb1145148/dsh-tools
-cd dsh-tools && sh install.sh
+```
+📦 dsh-tools 1.0.1
+   安装到: /usr/local/bin
+   ✅ /usr/local/bin/dsh-backup
+   ✅ /usr/local/bin/dsh-restore
+✅ 已在 PATH 里，直接敲 dsh-backup 就行
 ```
 
-**装到别处：**
+**看到两个 ✅ 就装好了。**
 
-```bash
-sh install.sh --prefix ~/bin
-```
-
-只依赖 `sh` / `tar` / `find` / `cp`，不需要 node、python、rsync。
-
----
-
-## 备份
+### 第 3 步：备份
 
 ```bash
 dsh-backup
 ```
 
-产物：`/sdcard/Download/dsh-backup/dsh-backup-<时间>.tar.gz`
+**等 10 秒左右**，看到 `✅ 完成` 就好了。
+
+---
+
+## 📁 备份文件在哪
+
+```
+/sdcard/Download/dsh-backup/dsh-backup-<日期>-<时间>.tar.gz
+```
+
+**用手机的文件管理器打开：**
+
+```
+文件管理 → Download → dsh-backup
+```
+
+**文件名带时间，每次备份都是新文件，不会覆盖旧的。**
+
+---
+
+## 📱 换新手机怎么用
+
+### 总览
+
+```
+旧手机                          新手机
+───────────────────────────────────────────
+① dsh-backup
+   ↓ 传文件（互传 / 数据线 / 微信）
+                              ② 重建环境（别导数据！）
+                                   ↓
+                              ③ 装工具
+                                   ↓
+                              ④ dsh-restore
+                                   ↓
+                              ⑤ 重启 Web
+```
+
+### ⚠️ 最容易做错的一步
+
+**一定要先重建环境，再导数据。**
+
+```
+❌ 先导数据 → 环境坏了，导进去也跑不起来
+✅ 先重建环境 → 跑通了再导数据
+```
+
+**怎么重建环境：**
+
+```
+设置 → 应用管理 → DSHA → 存储 → 清除数据
+然后打开 App，让它自己装（3-10 分钟）
+```
+
+**装之前先把这几个打开**（不然装到一半会被系统杀掉）：
+
+```
+设置 → 电池 → 后台耗电管理 → DSHA → 允许后台高耗电
+设置 → 应用管理 → DSHA → 电池 → 不受限制
+设置 → 应用管理 → DSHA → 自启动 → 允许
+```
+
+---
+
+## ❓ 常见问题
+
+### 我下载了，但不知道放哪
+
+**把这段发给 AI，让它处理：**
+
+```
+我下载了 dsh-tools 的压缩包，在 /sdcard/Download/ 里，
+帮我解压并安装，然后做一次备份。
+```
+
+### 敲 `dsh-backup` 提示 `command not found`
+
+安装没成功，或者装到了不在 PATH 里的位置。
+
+**重新跑一次 `sh install.sh`，然后看最后一行是不是绿色的「已在 PATH 里」。**
+
+### 备份完了，文件找不到
+
+**让 AI 帮你找：**
+
+```
+帮我找一下刚才 dsh-backup 生成的备份文件，列出路径和大小。
+```
+
+### 还原后看不到旧对话
+
+**大概率是 sessions 目录名对不上。**
+
+让 AI 执行：
+
+```bash
+ls ~/.dsh/sessions/
+```
+
+把输出发出来，看目录名是不是 `--root-xxx--` 这种形式，
+要和当前工作区路径对应。
+
+### 提示「逃逸软链」
+
+如果 `dsh-backup` 输出里 `软链:` 不是 0，说明还有指向包外的链接。
+**把输出发给 AI，让它看是哪几个。**
+
+### 备份要多久
+
+**10 秒左右。** 主要时间是压缩（数据 59 MB，取决于对话和附件多少）。
+
+### 备份文件多大
+
+```
+只有代码和对话    约 10 MB
+带附件和表情包    约 50-70 MB
+```
+
+### 会不会自动备份
+
+**不会。** 这是个手动命令，你敲一次它跑一次。
+
+**换机前跑一次就够了。**
+
+---
+
+## 🤔 为什么需要它
+
+DSHA 自带的「备份与恢复」目前有个 bug：
+
+```
+备份  → ✅ 成功
+恢复  → ❌ 报 ARCHIVE_LINK_ESCAPE
+```
+
+原因是它生成的 `portable.dshbak` 里保留了 `node_modules` 中指向归档根之外的软链
+（实测 51 处），恢复时的安全检查拒绝它们，导致整个还原失败。
+
+**结果就是换机迁移这条路完全走不通。**
+
+这个工具在打包阶段就把这类链接剔掉，所以恢复能过。
+
+---
+
+## 🔧 命令行速查（给懂的人）
+
+```bash
+# 安装到别处
+sh install.sh --prefix ~/bin
+
+# 备份
+dsh-backup
+
+# 还原（默认不动状态文件）
+dsh-restore /sdcard/Download/dsh-backup/xxx.tar.gz
+
+# 连状态文件一起还原（谨慎）
+dsh-restore xxx.tar.gz --all
+
+# 回滚插件
+rm -rf ~/.dsh/plugin-src
+mv ~/.dsh/plugin-src.before-restore ~/.dsh/plugin-src
+```
 
 **带走：**
 
@@ -77,83 +258,19 @@ home/          shell 配置和笔记
 | 状态文件（`plugin-activations.json` 等） | 覆盖会让新环境起不来 |
 | `.bridge_headers` 等凭据 | 不能外流 |
 | `node_modules` / 缓存 / 日志 | 可重建 |
-| 指向包外的软链 | 就是那个 `ARCHIVE_LINK_ESCAPE` 的来源 |
+| 指向包外的软链 | 就是那个 bug 的来源 |
 | 整个 Linux 环境 | 几 GB，跨设备必然失效 |
 
 ---
 
-## 还原
-
-```bash
-dsh-restore /sdcard/Download/dsh-backup/dsh-backup-20261022-1117.tar.gz
-```
-
-**默认行为：**
-
-- 只还原纯数据，**不覆盖状态文件**
-- 覆盖前自动把现有目录备份成 `*.before-restore`
-- 配置只补缺，不覆盖已有的
-
-**加 `--all`** 才连状态文件、`.bashrc` 一起还原。
-
-还原完**要重启 Web** 才生效。
-
----
-
-## 回滚
-
-```bash
-rm -rf ~/.dsh/plugin-src
-mv ~/.dsh/plugin-src.before-restore ~/.dsh/plugin-src
-```
-
----
-
-## 实际输出
-
-```console
-$ dsh-backup
-📦 准备打包...
-   源: /root/.dsh
-   ✅ 收集 7 个目录
-🔗 检查软链...
-   剔除: profiles/web/node_modules/dsh-web-mobile -> ../../../../dsha-web-mobile
-   ...（自动剔掉 8 个逃逸链接）
-🗜  压缩...
-
-✅ 完成
-   文件: /sdcard/Download/dsh-backup/dsh-backup-20261022-1117.tar.gz
-   大小: 59M
-   条目: 1018
-   软链: 0（逃逸型 0）
-```
-
----
-
-## 换机流程
-
-```
-旧机：dsh-backup
-   ↓  传文件（互传 / 数据线 / 网盘）
-新机：装环境（重建，别导数据）
-   ↓  等环境跑通、验证能对话
-新机：dsh-restore <包>
-   ↓  重启 Web
-   ↓  确认旧对话在、表情包能用
-```
-
-**顺序别反：环境先重建，数据后导入。**
-
----
-
-## 兼容
+## 📋 兼容
 
 - DSHA `0.2.21-*`（`session.v4.jsonl.zstd` 格式）
-- Android 上跑在 DSHA 的 Ubuntu 环境里
 - GNU tar 1.35 起
+- 只依赖 `sh` / `tar` / `find` / `cp`
 
 ---
 
-## License
+## 📄 License
 
 MIT
