@@ -40,7 +40,6 @@ for d in $INCLUDE_DIRS; do
   if [ -d "$DSH/$d" ]; then
     mkdir -p "$ROOT/$(dirname "$d")"
     cp -a "$DSH/$d" "$ROOT/$d" 2>/dev/null || true
-    # 回收站不备份
     copied=$((copied+1))
   fi
 done
@@ -60,7 +59,10 @@ say "   ✅ 收集 $copied 个目录"
 
 # ---------- 2. 剔掉逃逸软链（关键）----------
 say "🔗 检查软链..."
-removed=0
+# 剔除结果写进临时文件再统计 —— 管道右边的 while 跑在子 shell 里，
+# 直接累加变量传不出来。
+REMOVED_LOG="$STAGE/removed.log"
+: > "$REMOVED_LOG"
 find "$ROOT" -type l 2>/dev/null | while IFS= read -r l; do
   t=$(readlink "$l" 2>/dev/null) || continue
   bad=0
@@ -76,9 +78,16 @@ find "$ROOT" -type l 2>/dev/null | while IFS= read -r l; do
   esac
   if [ "$bad" = "1" ]; then
     rm -f "$l"
-    printf '   剔除: %s -> %s\n' "${l#$ROOT/}" "$t"
+    printf '%s -> %s\n' "${l#$ROOT/}" "$t" >> "$REMOVED_LOG"
   fi
 done
+if [ -s "$REMOVED_LOG" ]; then
+  while IFS= read -r line; do
+    printf '   剔除: %s\n' "$line"
+  done < "$REMOVED_LOG"
+fi
+removed=$(wc -l < "$REMOVED_LOG" 2>/dev/null || echo 0)
+say "   共剔除 $removed 个逃逸软链"
 # 兜底：名字里带 node_modules 的软链一律剔
 find "$ROOT" -type l -name "node_modules" -exec rm -f {} \; 2>/dev/null || true
 
