@@ -1,5 +1,31 @@
 # 更新日志
 
+## 1.0.3 — 2026-10-22
+
+三件事：截图演示、英文文档、一键安装。
+
+**① 截图演示**
+
+`docs/backup-demo.png` 和 `docs/restore-demo.png` —— 把真实的命令输出
+渲染成终端风格图片，放在 README 开头。
+
+用 HTML + Playwright 渲染的（环境里没有 GUI 可以截），内容就是脚本的实际输出。
+
+**② 英文文档**
+
+`README.en.md`，和中文版互链。
+
+**③ 一键安装**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sb1145148/dsh-tools/main/install-online.sh | sh
+```
+
+`install-online.sh` 会自己查最新版、下载、解压、调用 `install.sh`、清理临时目录。
+不用手动解压，不用管路径。
+
+**没改 dsh-backup / dsh-restore。**
+
 ## 1.0.2 — 2026-10-22
 
 README 重写，让不懂命令的人也能用。

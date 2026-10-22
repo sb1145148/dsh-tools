@@ -7,6 +7,10 @@ dsh-backup          # 备份，10 秒
 dsh-restore <包>    # 还原
 ```
 
+[English](README.en.md) · 中文
+
+![dsh-backup 演示](docs/backup-demo.png)
+
 ---
 
 ## 🚀 最快用法（不用懂任何命令）
@@ -37,10 +41,22 @@ dsh-restore <包>    # 还原
 
 ## 📥 我下载好了，然后呢
 
-如果你拿到的是 `dsh-tools-1.0.1.tar.gz`，**最省事的办法还是把上面那段发给 AI**，
+如果你拿到的是 `dsh-tools-1.0.2.tar.gz`，**最省事的办法还是把上面那段发给 AI**，
 它会帮你解压安装，你不用管路径。
 
-**想自己动手的话，就三步：**
+---
+
+## 一行命令（不用手动解压）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sb1145148/dsh-tools/main/install-online.sh | sh
+```
+
+**它会自己查最新版、下载、解压、安装、清理。** 装完直接敲 `dsh-backup`。
+
+---
+
+**想完全手动的话，就三步：**
 
 ### 第 1 步：解开压缩包
 
@@ -112,7 +128,9 @@ dsh-backup
                               ⑤ 重启 Web
 ```
 
-### ⚠️ 最容易做错的一步
+#![dsh-restore 演示](docs/restore-demo.png)
+
+## ⚠️ 最容易做错的一步
 
 **一定要先重建环境，再导数据。**
 
@@ -221,6 +239,9 @@ DSHA 自带的「备份与恢复」目前有个 bug：
 ## 🔧 命令行速查（给懂的人）
 
 ```bash
+# 一键安装（下载 + 解压 + 安装）
+curl -fsSL https://raw.githubusercontent.com/sb1145148/dsh-tools/main/install-online.sh | sh
+
 # 安装到别处
 sh install.sh --prefix ~/bin
 
