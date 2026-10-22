@@ -13,7 +13,7 @@ dsh-restore <file>  # restore
 
 ---
 
-# 🚀 Quick start (no commands needed)
+## 🚀 Quick start (no commands needed)
 
 **Open DSHA, copy the whole block below, paste it into the chat, send.**
 
@@ -39,7 +39,7 @@ You should see something like:
 
 ---
 
-# 📥 I downloaded it — now what?
+## 📥 I downloaded it — now what?
 
 **One-line install** (no manual extraction):
 
@@ -75,7 +75,7 @@ Two ✅ means it's installed.
 
 ---
 
-# 📁 Where is the backup file
+## 📁 Where is the backup file
 
 ```
 /sdcard/Download/dsh-backup/dsh-backup-<date>-<time>.tar.gz
@@ -85,7 +85,7 @@ Each backup gets a new timestamped filename — old ones are never overwritten.
 
 ---
 
-# 📱 Moving to a new phone
+## 📱 Moving to a new phone
 
 ```
 Old phone                         New phone
@@ -101,7 +101,7 @@ Old phone                         New phone
                               ⑤ restart Web
 ```
 
-## ⚠️ The step everyone gets wrong
+### ⚠️ The step everyone gets wrong
 
 **Rebuild the environment first, import data second.**
 
@@ -127,9 +127,9 @@ Settings → Apps → DSHA → Autostart → Allow
 
 ---
 
-# ❓ FAQ
+## ❓ FAQ
 
-## I downloaded it but don't know where to put it
+### I downloaded it but don't know where to put it
 
 **Send this to the AI:**
 
@@ -138,19 +138,19 @@ I downloaded the dsh-tools archive into /sdcard/Download/.
 Please extract it, install it, and run a backup.
 ```
 
-## `dsh-backup: command not found`
+### `dsh-backup: command not found`
 
 The install didn't finish, or it went somewhere not on `PATH`.
 
 Re-run `sh install.sh` and check whether the last line is the green "已在 PATH 里".
 
-## I ran the backup but can't find the file
+### I ran the backup but can't find the file
 
 ```
 Find the backup file dsh-backup just created and show me its path and size.
 ```
 
-## Old conversations are missing after restore
+### Old conversations are missing after restore
 
 Most likely the `sessions` directory name doesn't match:
 
@@ -160,23 +160,119 @@ ls ~/.dsh/sessions/
 
 It should look like `--root-xxx--`, matching the current workspace path.
 
-## It mentions "逃逸软链" (escaping symlinks)
+### It mentions "逃逸软链" (escaping symlinks)
 
 If `软链:` in the output isn't `0`, there are still links pointing outside the archive.
 Send the output to the AI so it can inspect them.
 
-## How long / how big
+### How long / how big
 
 - **Time:** ~10 seconds
 - **Size:** ~10 MB (code + conversations) to ~70 MB (with attachments and meme packs)
 
-## Does it back up automatically?
+### Does it back up automatically?
 
 **No.** It's a manual command — you run it, it runs once. Once before a phone migration is enough.
 
 ---
 
-# 🤔 Why this exists
+## 🆘 Error on the new device? Check these three things first
+
+**90% of migration problems are one of these three.** Check in order.
+
+---
+
+### ① Is the tool installed?
+
+```bash
+command -v dsh-restore
+```
+
+**Prints a path** (e.g. `/usr/local/bin/dsh-restore`) → installed, go to ②
+
+**Prints nothing** → **not installed**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sb1145148/dsh-tools/main/install-online.sh | sh
+```
+
+> ⚠️ **Every "Clear data" + environment rebuild wipes `/usr/local/bin`.**
+> Having it on the old phone does not mean the new phone has it.
+
+**This is the most common one.** The error looks like:
+
+```
+dsh-restore: not found
+No such file or directory
+```
+
+---
+
+### ② Does the file exist?
+
+```bash
+ls -l /sdcard/Download/dsh-backup-*.tar.gz
+```
+
+**Prints a line** → it's there. Check the size — should be around **60 MB**.
+
+**Prints nothing** → search wider:
+
+```bash
+find /sdcard/Download -maxdepth 2 -name "*.tar.gz" 2>/dev/null
+```
+
+> 💡 **"Internal storage" in your file manager is `/sdcard` on the command line.**
+> Don't type the translated name into the shell.
+
+**Common traps:**
+
+| Situation | Symptom |
+| --- | --- |
+| File is in a subfolder | Path missing a level |
+| Transfer incomplete | Size doesn't match (a few MB) |
+| Filename has spaces or CJK | **Must be quoted** |
+
+---
+
+### ③ Does the directory name match?
+
+**This is why a successful restore can still show no old conversations.**
+
+```bash
+ls ~/.dsh/sessions/
+```
+
+Should print **one** directory named like:
+
+```
+--root-deepseek-harness--
+```
+
+**The name is derived from the workspace path** (slashes replaced with `-`).
+
+**If it doesn't match, old conversations won't appear.** Send both:
+
+```bash
+ls ~/.dsh/sessions/     # current directory name
+pwd                     # current workspace
+```
+
+---
+
+### 📊 Error → cause
+
+| What you see | Which check |
+| --- | --- |
+| `dsh-restore: not found` | **① not installed** |
+| `bash: /sdcard/...: No such file` | **② wrong path** |
+| `❌ 找不到文件: /sdcard/...` | **② wrong path** |
+| Restore succeeded but no conversations | **③ name mismatch** |
+| Only the usage message printed | Argument split by spaces → **quote it** |
+
+---
+
+## 🤔 Why this exists
 
 DSHA's built-in "Backup and restore" currently has a bug:
 
@@ -195,7 +291,7 @@ This tool strips those links at **packaging time**, so the restore goes through.
 
 ---
 
-# 🔧 Reference
+## 🔧 Reference
 
 ```bash
 # install elsewhere
@@ -240,7 +336,7 @@ home/          shell config and notes
 
 ---
 
-# 📋 Compatibility
+## 📋 Compatibility
 
 - DSHA `0.2.21-*` (`session.v4.jsonl.zstd` format)
 - GNU tar 1.35+
@@ -248,6 +344,6 @@ home/          shell config and notes
 
 ---
 
-# 📄 License
+## 📄 License
 
 MIT

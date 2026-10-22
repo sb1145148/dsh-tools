@@ -46,7 +46,7 @@ dsh-restore <包>    # 还原
 
 ---
 
-## 一行命令（不用手动解压）
+### 一行命令（不用手动解压）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sb1145148/dsh-tools/main/install-online.sh | sh
@@ -130,7 +130,7 @@ dsh-backup
 
 #![dsh-restore 演示](docs/restore-demo.png)
 
-## ⚠️ 最容易做错的一步
+### ⚠️ 最容易做错的一步
 
 **一定要先重建环境，再导数据。**
 
@@ -215,6 +215,105 @@ ls ~/.dsh/sessions/
 **不会。** 这是个手动命令，你敲一次它跑一次。
 
 **换机前跑一次就够了。**
+
+---
+
+## 🆘 在新设备上报错？先查这三样
+
+**换机时 90% 的问题都出在这三处。** 按顺序查，基本一次就定位到。
+
+---
+
+### ① 工具装了吗
+
+```bash
+command -v dsh-restore
+```
+
+**有输出**（比如 `/usr/local/bin/dsh-restore`）→ 装了，看 ②
+
+**无输出** → **没装**，装一下：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sb1145148/dsh-tools/main/install-online.sh | sh
+```
+
+> ⚠️ **每次「清除数据」重建环境之后，`/usr/local/bin` 会被清空。**
+> 所以新手机上必须重新装一次 —— 旧手机装过不等于新手机有。
+
+**这是最常见的一个**，报错长这样：
+
+```
+dsh-restore: not found
+No such file or directory
+```
+
+---
+
+### ② 文件在不在
+
+```bash
+ls -l /sdcard/Download/dsh-backup-*.tar.gz
+```
+
+**有输出** → 在。看大小对不对（约 **60 MB**）
+
+**无输出** → 换个地方找：
+
+```bash
+find /sdcard/Download -maxdepth 2 -name "*.tar.gz" 2>/dev/null
+```
+
+> 💡 **文件管理器里的「手机存储」= 命令行里的 `/sdcard`。**
+> 别把「手机存储」四个字打进命令里。
+
+**常见坑：**
+
+| 情况 | 症状 |
+| --- | --- |
+| 文件在子目录里 | 路径少写一层 |
+| 传输没完成 | 大小对不上（比如只有几 MB） |
+| 文件名有空格或中文 | 命令里**必须加引号** |
+
+---
+
+### ③ 目录名对得上吗
+
+**这是「还原明明成功了，但看不到旧对话」的原因。**
+
+```bash
+ls ~/.dsh/sessions/
+```
+
+应该输出**一个**目录，名字形如：
+
+```
+--root-deepseek-harness--
+```
+
+**这个名字必须和当前工作区路径对应。** 它把 `/root/deepseek-harness`
+里的斜杠换成 `-` 得来的。
+
+**对不上 → 旧对话不会出现在列表里。**
+
+把这三条的输出一起发出来，就能定位：
+
+```bash
+ls ~/.dsh/sessions/     # 现在的目录名
+pwd                     # 当前工作区
+```
+
+---
+
+### 📊 报错 → 对号入座
+
+| 你看到的 | 对应哪一条 |
+| --- | --- |
+| `dsh-restore: not found` | **① 工具没装** |
+| `bash: /sdcard/...: No such file` | **② 路径不对** |
+| `❌ 找不到文件: /sdcard/...` | **② 路径不对** |
+| 还原成功但没旧对话 | **③ 目录名不匹配** |
+| 只输出了用法提示 | 参数被空格拆开了 → **加引号** |
 
 ---
 
