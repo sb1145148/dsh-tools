@@ -1,0 +1,140 @@
+#!/bin/sh
+# ============================================================
+#  dsh-restore —— 从 dsh-backup 的包还原数据
+#
+#  用法:  dsh-restore <包路径> [--all]
+#
+#  默认只还原「纯数据」：
+#    sessions / attachments / plugin-src / meme-packs / plugin-kits / profiles
+#
+#  不还原（覆盖会弄坏新环境）：
+#    - 状态文件（plugin-activations.json 等）
+#    - workspace.json
+#    - home/.bashrc（含旧机路径）
+#   加 --all 才连这些一起还原。
+# ============================================================
+set -u
+
+PKG="${1:-}"
+MODE="${2:-safe}"
+HOME_DIR="${HOME:-/root}"
+DSH="$HOME_DIR/.dsh"
+
+say() { printf '%s\n' "$*"; }
+die() { printf '❌ %s\n' "$*" >&2; exit 1; }
+
+case "${PKG:-}" in
+  -h|--help|"")
+    cat <<'HLP'
+用法: dsh-restore <包路径> [--all]
+
+  从 dsh-backup 生成的包还原数据。
+
+  默认只还原纯数据（sessions / attachments / plugin-src /
+  meme-packs / plugin-kits / profiles），
+  不覆盖状态文件，覆盖前自动备份成 *.before-restore。
+
+  --all   连状态文件和 .bashrc 一起还原（谨慎）
+
+示例:
+  dsh-restore /sdcard/Download/dsh-backup/dsh-backup-20261022-1117.tar.gz
+HLP
+    exit 0
+    ;;
+esac
+[ -f "$PKG" ] || die "找不到文件: $PKG"
+PKG=$(cd "$(dirname "$PKG")" && pwd)/$(basename "$PKG")
+[ -d "$DSH" ] || die "找不到 $DSH"
+
+# ---------- 1. 安全检查 ----------
+say "🔍 检查包..."
+bad=$(tar -tvzf "$PKG" 2>/dev/null | awk '$1 ~ /^l/ && ($NF ~ /^\// || $NF ~ /\.\.\/\.\./)' | wc -l)
+if [ "$bad" -gt 0 ]; then
+  say "   ⚠️  发现 $bad 个逃逸软链，解压时会被跳过（不影响其它文件）"
+fi
+
+# ---------- 2. 解到临时目录 ----------
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/dsh-restore.XXXXXX")
+trap 'rm -rf "$STAGE"' EXIT INT TERM
+say "📂 解压..."
+tar -xzpf "$PKG" -C "$STAGE" 2>/dev/null || die "解压失败（包可能损坏）"
+
+SRC=$(find "$STAGE" -maxdepth 1 -mindepth 1 -type d | head -1)
+[ -n "$SRC" ] || die "包里没有目录"
+say "   内容: $(ls "$SRC" | tr '\n' ' ')"
+
+# ---------- 3. 逐项还原 ----------
+restore_dir() {
+  name="$1"; src="$SRC/$1"; dst="$DSH/$1"
+  [ -d "$src" ] || { say "   ⏭  $name（包内没有）"; return; }
+  if [ -e "$dst" ]; then
+    backup="${dst}.before-restore"
+    [ -e "$backup" ] && rm -rf "$backup"
+    cp -a "$dst" "$backup" 2>/dev/null || true
+    say "   💾 已备份现有 $name → $(basename "$backup")"
+  fi
+  mkdir -p "$dst"
+  cp -a "$src/." "$dst/" 2>/dev/null || true
+  say "   ✅ $name"
+}
+
+say ""
+say "♻️  还原中..."
+restore_dir sessions
+restore_dir attachments
+restore_dir plugin-src
+restore_dir meme-packs
+restore_dir plugin-kits
+restore_dir profiles
+
+# 配置：只补缺的，不覆盖已有的
+if [ -d "$SRC/config" ]; then
+  say ""
+  say "⚙️  配置（只补缺，不覆盖）:"
+  mkdir -p "$DSH/config"
+  for f in "$SRC"/config/*; do
+    [ -f "$f" ] || continue
+    b=$(basename "$f")
+    if [ -e "$DSH/config/$b" ]; then
+      say "   ⏭  $b（已有，保留）"
+    else
+      cp -a "$f" "$DSH/config/$b" && say "   ➕ $b"
+    fi
+  done
+fi
+
+# ---------- 4. --all 才动的东西 ----------
+if [ "$MODE" = "--all" ]; then
+  say ""
+  say "⚠️  --all 模式：额外还原状态文件"
+  for f in "$SRC"/config/*.json "$SRC/workspace.json"; do
+    [ -f "$f" ] || continue
+    cp -a "$f" "$DSH/$(basename "$f")" 2>/dev/null && say "   ✅ $(basename "$f")"
+  done
+  for f in "$SRC"/home/.bashrc "$SRC"/home/.profile; do
+    [ -f "$f" ] || continue
+    [ -e "$HOME_DIR/$(basename "$f")" ] && cp -a "$HOME_DIR/$(basename "$f")" "$HOME_DIR/$(basename "$f").before-restore"
+    cp -a "$f" "$HOME_DIR/" && say "   ✅ home/$(basename "$f")"
+  done
+fi
+
+# ---------- 5. 检查目录名 ----------
+if [ -d "$DSH/sessions" ]; then
+  say ""
+  say "📁 sessions 目录:"
+  ls "$DSH/sessions" | sed 's/^/   /'
+  say ""
+  say "   ⚠️  目录名必须和当前工作区路径对应（形如 --root-xxx--）"
+  say "      对不上就在应用里看不到旧对话。"
+fi
+
+say ""
+say "✅ 还原完成"
+say ""
+say "下一步："
+say "   1. 重启 Web（在应用里 停止 → 启动）"
+say "   2. 重启后打开对话列表，看看旧对话在不在"
+say "   3. 让 AI 发个表情包，确认插件正常"
+say ""
+say "如果出问题，回滚："
+say "   rm -rf $DSH/plugin-src && mv $DSH/plugin-src.before-restore $DSH/plugin-src"

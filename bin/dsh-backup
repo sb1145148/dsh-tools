@@ -1,0 +1,138 @@
+#!/bin/sh
+# ============================================================
+#  dsh-backup —— 一键打包 DSH 数据
+#
+#  输出到 /sdcard/Download/dsh-backup/dsh-backup-<时间>.tar.gz
+#
+#  为什么不用应用自带的「备份与恢复」：
+#    它生成的 portable.dshbak 里含指向包外的软链，
+#    恢复时被自己的安全检查拒绝（ARCHIVE_LINK_ESCAPE）。
+#    这个脚本在打包阶段就把这类链接剔掉。
+# ============================================================
+set -u
+
+HOME_DIR="${HOME:-/root}"
+DSH="$HOME_DIR/.dsh"
+STAMP=$(date +%Y%m%d-%H%M)
+OUT_DIR="/sdcard/Download/dsh-backup"
+OUT="$OUT_DIR/dsh-backup-$STAMP.tar.gz"
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/dsh-backup.XXXXXX")
+ROOT="$STAGE/dsh-backup-$STAMP"
+
+say() { printf '%s\n' "$*"; }
+die() { printf '❌ %s\n' "$*" >&2; exit 1; }
+
+cleanup() { rm -rf "$STAGE"; }
+trap cleanup EXIT INT TERM
+
+[ -d "$DSH" ] || die "找不到 $DSH"
+
+say "📦 准备打包..."
+say "   源: $DSH"
+mkdir -p "$ROOT" "$OUT_DIR"
+
+# ---------- 1. 决定要带什么 ----------
+INCLUDE_DIRS="sessions attachments config plugin-src meme-packs plugin-kits profiles storages"
+INCLUDE_FILES="workspace.json"
+
+copied=0
+for d in $INCLUDE_DIRS; do
+  if [ -d "$DSH/$d" ]; then
+    mkdir -p "$ROOT/$(dirname "$d")"
+    cp -a "$DSH/$d" "$ROOT/$d" 2>/dev/null || true
+    # 回收站不备份
+    copied=$((copied+1))
+  fi
+done
+for f in $INCLUDE_FILES; do
+  [ -f "$DSH/$f" ] && cp -a "$DSH/$f" "$ROOT/" 2>/dev/null
+done
+
+# shell 配置 + 笔记（只带，不覆盖式还原）
+mkdir -p "$ROOT/home"
+[ -f "$HOME_DIR/.bashrc" ]  && cp -a "$HOME_DIR/.bashrc"  "$ROOT/home/" 2>/dev/null
+[ -f "$HOME_DIR/.profile" ] && cp -a "$HOME_DIR/.profile" "$ROOT/home/" 2>/dev/null
+for f in "$HOME_DIR"/*.md; do
+  [ -f "$f" ] && cp -a "$f" "$ROOT/home/" 2>/dev/null
+done
+
+say "   ✅ 收集 $copied 个目录"
+
+# ---------- 2. 剔掉逃逸软链（关键）----------
+say "🔗 检查软链..."
+removed=0
+find "$ROOT" -type l 2>/dev/null | while IFS= read -r l; do
+  t=$(readlink "$l" 2>/dev/null) || continue
+  bad=0
+  case "$t" in
+    /*) bad=1 ;;                            # 绝对路径
+    *..*)                                  # 相对路径，判断是否逃出根
+      resolved=$(cd "$(dirname "$l")" 2>/dev/null && cd "$t" 2>/dev/null && pwd -P 2>/dev/null)
+      case "$resolved" in
+        "$ROOT"/*) ;;                      # 还在根里，安全
+        *) bad=1 ;;
+      esac
+      ;;
+  esac
+  if [ "$bad" = "1" ]; then
+    rm -f "$l"
+    printf '   剔除: %s -> %s\n' "${l#$ROOT/}" "$t"
+  fi
+done
+# 兜底：名字里带 node_modules 的软链一律剔
+find "$ROOT" -type l -name "node_modules" -exec rm -f {} \; 2>/dev/null || true
+
+# ---------- 3. 排除缓存/状态 ----------
+find "$ROOT" \( -name "__pycache__" -o -name "node_modules" -o -name "*.map" -o -name ".sessions-trash" \) -type d -exec rm -rf {} + 2>/dev/null || true
+rm -f "$ROOT"/config/*.log 2>/dev/null
+
+# ---------- 4. 写说明 ----------
+cat > "$ROOT/README.md" <<EOF
+# DSH 备份
+
+时间：$(date '+%Y-%m-%d %H:%M:%S')
+主机：$(hostname 2>/dev/null || echo unknown)
+来源：$DSH
+
+## 还原
+
+\`\`\`bash
+dsh-restore /sdcard/Download/dsh-backup/dsh-backup-$STAMP.tar.gz
+\`\`\`
+
+## 里面有什么
+
+- \`sessions/\`      对话记录
+- \`attachments/\`   对话里的图片和文件
+- \`plugin-src/\`    插件源码
+- \`meme-packs/\`    表情包
+- \`config/\`        配置（不含凭据）
+- \`home/\`          shell 配置和笔记
+
+## 没带的（故意的）
+
+- 状态文件（plugin-activations.json 等）—— 覆盖会弄坏新环境
+- .bridge_headers 等凭据
+- node_modules / 缓存 / 日志
+- 指向包外的软链（见 dsh-backup 里的说明）
+EOF
+
+# ---------- 5. 打包 ----------
+say "🗜  压缩..."
+tar -czf "$OUT" -C "$STAGE" "dsh-backup-$STAMP" || die "打包失败"
+
+# ---------- 6. 自检 ----------
+sym=$(tar -tvzf "$OUT" 2>/dev/null | awk '$1 ~ /^l/' | wc -l)
+bad=$(tar -tvzf "$OUT" 2>/dev/null | awk '$1 ~ /^l/ && ($NF ~ /^\// || $NF ~ /\.\.\/\.\./)' | wc -l)
+n=$(tar -tzf "$OUT" 2>/dev/null | wc -l)
+
+say ""
+say "✅ 完成"
+say "   文件: $OUT"
+say "   大小: $(du -h "$OUT" | cut -f1)"
+say "   条目: $n"
+say "   软链: $sym（逃逸型 $bad）"
+[ "$bad" -gt 0 ] && say "   ⚠️  仍有逃逸软链，还原时可能被拒"
+say ""
+say "下一步：把这个文件传到新设备，然后跑"
+say "   dsh-restore $OUT"
