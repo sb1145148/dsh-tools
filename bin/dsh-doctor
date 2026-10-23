@@ -37,6 +37,15 @@ for a in "$@"; do
     --fix)         MODE="fix" ;;
     --strip-type)  SKIP_NEXT=1 ;;
     --strip-type=*) STRIP_TYPE="$STRIP_TYPE ${a#*=}" ;;
+    --strip-type*)
+      # 漏了空格：--strip-typejob/registered
+      # 注意：这里还不能用 die()，函数在下面才定义
+      printf '❌ 选项没写对：%s\n' "$a" >&2
+      printf '   是不是 --strip-type 后面漏了空格？应该是：\n' >&2
+      printf "     dsh-doctor --fix --strip-type '类型名'\n" >&2
+      printf '   例如：\n' >&2
+      printf '     dsh-doctor --fix --strip-type job/registered\n' >&2
+      exit 1 ;;
     --json)     MODE="json" ;;
     --rollback) MODE="rollback" ;;
     --i-know)   : ;;              # 配合 --fix，跳过「Web 还在跑」的拦截
@@ -46,6 +55,28 @@ for a in "$@"; do
     *) printf '❌ 不认识的选项: %s\n' "$a" >&2; exit 1 ;;
   esac
 done
+
+# ------------------------------------------------------------
+#  容错：从应用报错里复制粘贴时，很容易把整段带进来
+#
+#    dsh-doctor --fix --strip-type "job/registered" (seq 14511)
+#                                     ^引号            ^括号
+#
+#  规则：去掉引号；如果还有空格或括号，只取第一个词并提示。
+#  不这么做用户会撞在 bash 语法错误上，而不是看到有用的信息。
+# ------------------------------------------------------------
+if [ -n "$STRIP_TYPE" ]; then
+  RAW_STRIP=$(printf '%s' "$STRIP_TYPE" | sed 's/^ *//')
+  # 事件类型名不会含空格，所以取第一个词就够
+  FIRST=$(printf '%s' "$RAW_STRIP" | awk '{print $1}' | tr -d '"'"'"'' | sed 's/[;:,.。，]*$//')
+  if [ "$FIRST" != "$RAW_STRIP" ]; then
+    printf 'ℹ️  参数里有多余内容，只用了第一个词\n' >&2
+    printf '   你给的: %s\n' "$RAW_STRIP" >&2
+    printf '   用的:   %s\n' "$FIRST" >&2
+    printf '   （事件类型名不含空格，所以不会误判）\n' >&2
+  fi
+  STRIP_TYPE="$FIRST"
+fi
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '⚠️  %s\n' "$*" >&2; }
@@ -244,7 +275,9 @@ fi
 TOTAL_PROB=$((UNREADABLE + GAPS))
 say ""
 say "──────────────────────────────────────"
-if [ "$TOTAL_PROB" -eq 0 ]; then
+# 注意：指定了 --strip-type 就不能在这里退出 ——
+# 用户明确要求剥某个类型，那本身就是要做的事。
+if [ "$TOTAL_PROB" -eq 0 ] && [ -z "$STRIP_TYPE" ]; then
   say "✅ 没发现「确定的问题」（seq 断档 0，文件都能解开）"
   if [ "$NC_COUNT" -gt 0 ]; then
     say ""
@@ -343,7 +376,7 @@ fi
 
 # --- 剥未知事件 ---
 if [ -n "$STRIP_TYPE" ]; then
-  say "  ▸ 剥指定事件类型:$STRIP_TYPE"
+  say "  ▸ 剥指定事件类型: $STRIP_TYPE"
   printf '%s\n' "$SESS_FILES" | while IFS= read -r f; do
     [ -n "$f" ] || continue
     :

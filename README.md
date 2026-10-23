@@ -502,11 +502,19 @@ contains event type "job/registered" (seq 14511)
 unknown to this harness and not marked ignorable
 ```
 
-把报错里的类型名交给：
+把报错里的类型名交给 —— **只抄类型名，不要引号、不要 `(seq 14511)`**：
 
 ```bash
-dsh-doctor --fix --strip-type job/registered
+dsh-doctor --fix --strip-type job/registered --i-know
 ```
+
+**下面这几种写法也能用**（工具会清理）：
+
+```bash
+dsh-doctor --fix --strip-type 'job/registered" (seq 14511)'   # 整段粘贴
+```
+
+但 `--strip-type` 和类型名之间**要有空格** —— 漏了会明确报错告诉你。
 
 ### dsh-events
 

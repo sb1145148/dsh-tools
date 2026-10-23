@@ -1,5 +1,94 @@
 # 更新日志
 
+## 1.5.1 — 2026-10-24
+
+**修 `--strip-type` 的三个使用问题。**
+
+### 起因
+
+有用户照着文档敲：
+
+```bash
+dsh-doctor --fix --strip-typejob/registered" (seq 14511)
+```
+
+报 `bash: syntax error near unexpected token '('`。
+
+两处错：
+
+1. **`--strip-type` 后面漏了空格**
+2. **把应用报错整段抄进来了** —— `"` 和 `(seq 14511)` 让 bash 崩了
+
+**文档只给了占位符 `xxx`，没给完整示例**，这是我的问题。
+
+### 改了什么
+
+**① 漏空格 → 明确告诉正确写法**
+
+```console
+❌ 选项没写对：--strip-typejob/registered
+   是不是 --strip-type 后面漏了空格？应该是：
+     dsh-doctor --fix --strip-type '类型名'
+   例如：
+     dsh-doctor --fix --strip-type job/registered
+```
+
+**② 整段粘贴 → 自动清理，并说清用了什么**
+
+```console
+ℹ️  参数里有多余内容，只用了第一个词
+   你给的: job/registered" (seq 14511)
+   用的:   job/registered
+   （事件类型名不含空格，所以不会误判）
+```
+
+事件类型名不会含空格，所以取第一个词是安全的。
+
+**③ 修了一个逻辑 bug**
+
+`--fix` 在「没发现确定的问题」时直接退出了，**根本没走到剥离**：
+
+```sh
+# 以前
+if [ "$TOTAL_PROB" -eq 0 ]; then exit 0; fi
+
+# 现在
+if [ "$TOTAL_PROB" -eq 0 ] && [ -z "$STRIP_TYPE" ]; then exit 0; fi
+```
+
+用户明确指定了要剥某个类型，那本身就是要做的事。
+
+**④ 顺手修**
+
+`die()` 在参数解析阶段调用，但那时函数还没定义 → `die: not found`。
+改成 `printf` + `exit`。
+
+### 实测
+
+```console
+$ dsh-doctor --fix --strip-type 'job/registered" (seq 14511)' --i-know
+ℹ️  参数里有多余内容，只用了第一个词
+   用的:   job/registered
+...
+  ▸ 剥指定事件类型: job/registered
+       s1
+           保留 3 行，剥离 1 行，重排 seq 1..3
+            残留指定类型: 0
+✅ 修复完成
+
+验证: job/registered 剥掉 ✅
+```
+
+### 文档也改了
+
+不再用 `xxx` 这种占位符，直接给能跑的命令：
+
+```bash
+dsh-doctor --fix --strip-type job/registered --i-know
+```
+
+并说明：**只抄类型名，不要引号、不要 `(seq 14511)`。**
+
 ## 1.5.0 — 2026-10-24
 
 **修 `dsh-doctor` 的假阴性 —— 它会报「没问题」，但会话其实读不了。**
