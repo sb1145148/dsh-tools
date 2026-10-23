@@ -1,0 +1,104 @@
+#!/bin/sh
+# ============================================================
+#  dsh-events —— 列出「当前安装的 harness 认识哪些会话事件类型」
+#
+#  用法:
+#    dsh-events            一行一个类型
+#    dsh-events --count    只输出个数
+#    dsh-events --check t  某个类型认不认识（退出码 0=认识 1=不认识）
+#
+#  为什么需要它：
+#    会话日志里如果出现当前 harness 不认识的事件类型，应用会**整份拒读**
+#    （不是跳过那一条）。所以判断「这份日志能不能被读」时，
+#    必须拿「当前这份安装认识什么」来比，不能拿写死的列表。
+#
+#    0.2.1 加了 job/registered；0.2.0 不认识它。
+#    写死的列表会让 0.2.0 误判成「全都认识」—— 假阴性。
+#
+#  权威来源：harness 里的 SessionEventMap 接口声明。
+# ============================================================
+set -u
+
+MODE="list"
+WANT=""
+for a in "$@"; do
+  case "$a" in
+    --count) MODE="count" ;;
+    --check) MODE="check" ;;
+    -*) ;;
+    *) WANT="$a" ;;
+  esac
+done
+
+NAMES=$(python3 - <<'PY' 2>/dev/null
+import glob, json, os, re, sys
+
+roots = []
+env = os.environ.get('DSH_HARNESS_ROOTS', '')
+if env:
+    roots = [r for r in env.split(':') if r]
+else:
+    roots = [
+        '/usr/local/lib/node_modules/@deepseek-ai',
+        '/usr/lib/node_modules/@deepseek-ai',
+        os.path.expanduser('~/.npm-global/lib/node_modules/@deepseek-ai'),
+    ]
+
+names = set()
+for root in roots:
+    if not os.path.isdir(root):
+        continue
+    cands = []
+    try:
+        pkgs = glob.glob(os.path.join(root, '*'))
+    except Exception:
+        pkgs = []
+    for pkg in pkgs:
+        cands += glob.glob(os.path.join(pkg, 'lib', '**', '*.js'), recursive=True)
+        cands += glob.glob(os.path.join(pkg, 'node_modules', '@deepseek-ai', '*', 'lib', '**', '*.js'), recursive=True)
+    for f in cands:
+        try:
+            s = open(f, encoding='utf-8', errors='ignore').read()
+        except Exception:
+            continue
+        if 'SessionEventMap' not in s:
+            continue
+        m = re.search(r'"declaration":\s*"((?:[^"\\]|\\.)*?SessionEventMap\s*\{.*?\})"', s, re.S)
+        if not m:
+            continue
+        try:
+            decl = json.loads('"' + m.group(1) + '"')
+        except Exception:
+            continue
+        found = re.findall(r"'([a-z][a-z0-9-]*(?:/[a-z0-9-]+)+)'\s*:", decl)
+        if found:
+            names.update(found)
+        if len(names) > 40:
+            break
+    if len(names) > 40:
+        break
+
+if names:
+    print('\n'.join(sorted(names)))
+    sys.exit(0)
+sys.exit(1)
+PY
+)
+
+if [ -z "$NAMES" ]; then
+  printf '❌ 读不到 harness 的事件注册表\n' >&2
+  exit 2
+fi
+
+case "$MODE" in
+  count) printf '%s\n' "$NAMES" | grep -c . ;;
+  check)
+    [ -n "$WANT" ] || { printf '❌ --check 后面要跟类型名\n' >&2; exit 2; }
+    if printf '%s\n' "$NAMES" | grep -qx "$WANT"; then
+      exit 0
+    else
+      exit 1
+    fi
+    ;;
+  *) printf '%s\n' "$NAMES" ;;
+esac

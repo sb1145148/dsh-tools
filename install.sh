@@ -26,7 +26,7 @@ mkdir -p "$PREFIX" 2>/dev/null || true
 [ -w "$PREFIX" ] || { say "❌ $PREFIX 不可写。加 sudo，或换 --prefix ~/bin"; exit 1; }
 
 INSTALLED=""
-for f in dsh-backup dsh-restore dsh-repair dsh-strip dsh-doctor; do
+for f in dsh-backup dsh-restore dsh-repair dsh-strip dsh-doctor dsh-events; do
   # 包里缺这个就跳过，不要整个安装挂掉
   if [ ! -f "$HERE/bin/$f" ]; then
     say "   ⏭  $f（包里没有，跳过）"
@@ -70,6 +70,9 @@ fi
 if has dsh-strip; then
   say "   dsh-strip --list <文件>     看会话里有哪些事件类型"
   say "   dsh-strip <文件> <类型...>   剥掉不认识的事件类型"
+fi
+if has dsh-events; then
+  say "   dsh-events                  当前 harness 认识哪些事件类型"
 fi
 
 if has dsh-doctor; then

@@ -1,5 +1,104 @@
 # 更新日志
 
+## 1.5.0 — 2026-10-24
+
+**修 `dsh-doctor` 的假阴性 —— 它会报「没问题」，但会话其实读不了。**
+
+### 问题
+
+1.4.x 里的事件类型列表是**硬编码**的，按 0.2.1 的会话统计出来：
+
+```sh
+KNOWN_EVENTS="... job/registered job/settled ..."
+```
+
+而 0.2.0 **不认识** `job/registered`。于是：
+
+```
+日志有 job/registered → 查硬编码列表 → 有 → 「✅ 全部认识」
+                     → 但应用（0.2.0）不认识 → 照样读不了
+```
+
+**假阴性。用户以为没事。**
+
+### 改法
+
+**新增 `dsh-events`** —— 从**已安装的 harness** 里读事件注册表：
+
+```bash
+dsh-events --count                       # 53
+dsh-events --check job/registered        # 0=认识 1=不认识
+```
+
+权威来源是 harness 里的 `SessionEventMap` 接口声明。
+`dsh-doctor` 现在用它，并在输出里标出来源：
+
+```
+事件表:     取自已安装的 harness（53 种）
+```
+
+读不到才退回内置参考列表，并明确标「结论可能不准」。
+
+### 但还有一层更麻烦的
+
+改完发现：核心表只有 52 种，而实际日志里有 3000 多条事件不在表里
+（`deliverables/presented`、`session-log-deepseek/delivery-accepted`、
+`web/deepseek-search-llm-request` ……）。**这些是插件产生的事件。**
+
+所以：
+
+| 做法 | 结果 |
+| --- | --- |
+| 硬编码列表 | 假阴性（0.2.0 上漏报） |
+| harness 核心表 | 假阳性（插件事件被当成问题） |
+
+**都不准。**
+
+### 所以改成「诚实报告」
+
+```console
+✅ 没发现「确定的问题」（seq 断档 0，文件都能解开）
+
+ℹ️  但有 3151 条非核心事件（上面列了类型）。
+   工具**无法**判断这些会不会让应用读不了 —— 插件事件和
+   新版本事件长得一样。
+
+   如果你确实打不开某个会话，看应用报的错：
+     contains event type "xxx" unknown to this harness
+   把那个 xxx 交给：
+     dsh-doctor --fix --strip-type xxx
+```
+
+**「非核心事件」不再计入问题数。** 工具只对**它能确定的事**下结论。
+
+### `--fix` 的行为也收紧了
+
+```bash
+dsh-doctor --fix                      # 只修 seq 断档（安全）
+dsh-doctor --fix --strip-type xxx     # 再剥掉你点名的那个
+```
+
+**不再自动剥「所有不认识的事件」** —— 那会误伤插件事件。
+类型名从应用报错里抄，那才是真凭据。
+
+### 实测
+
+造了带 `job/registered` + seq 断档的会话：
+
+```console
+$ dsh-doctor --fix --strip-type job/registered --i-know
+      s1
+          保留 6 行，剥离 2 行，重排 seq 1..6
+           残留指定类型: 0
+✅ 修复完成
+
+验证: job/registered 剥掉 ✅  seq 连续 ✅
+```
+
+### 现在 6 个工具
+
+`dsh-backup` / `dsh-restore` / `dsh-repair` / `dsh-strip` / `dsh-doctor` / `dsh-events`
+
 ## 1.4.1 — 2026-10-23
 
 **修安装后的用法提示。**

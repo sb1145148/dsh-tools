@@ -9,7 +9,7 @@
 #
 #  能自动修的:
 #    · seq 断档        → dsh-repair
-#    · 未知事件类型     → dsh-strip
+#    · 非核心事件类型   → 只报告，不自动剥（用 --strip-type 显式指定）
 #
 #  只报告、不自动修的:
 #    · 会话格式变了（v4 → v5）—— 需要人工确认
@@ -23,15 +23,20 @@
 # ============================================================
 set -u
 
-TOOLS_VERSION="1.4.0"
+TOOLS_VERSION="1.5.0"
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
 SESS="$DSH/sessions"
 
 MODE="check"
+STRIP_TYPE=""
+SKIP_NEXT=0
 for a in "$@"; do
+  if [ "$SKIP_NEXT" = "1" ]; then STRIP_TYPE="$STRIP_TYPE $a"; SKIP_NEXT=0; continue; fi
   case "$a" in
-    --fix)      MODE="fix" ;;
+    --fix)         MODE="fix" ;;
+    --strip-type)  SKIP_NEXT=1 ;;
+    --strip-type=*) STRIP_TYPE="$STRIP_TYPE ${a#*=}" ;;
     --json)     MODE="json" ;;
     --rollback) MODE="rollback" ;;
     --i-know)   : ;;              # 配合 --fix，跳过「Web 还在跑」的拦截
@@ -51,8 +56,28 @@ have() { command -v "$1" >/dev/null 2>&1; }
 have zstd    || die "需要 zstd"
 have python3 || die "需要 python3"
 
-# 已知事件类型（随版本更新）
-KNOWN_EVENTS="session step/start step/end turn/start turn/end assistant/message
+# ============================================================
+#  已知事件类型 —— 从**已安装的 harness** 里读，不是写死的
+#
+#  ⚠️ 1.4.x 这里是一个硬编码列表，按 0.2.1 统计出来的。
+#     在 0.2.0 上完全失效：0.2.0 不认识 job/registered，
+#     但列表里有它，于是报「全部认识」，应用照样读不了。
+#     **假阴性比不检查更糟** —— 用户以为没事。
+#
+#  现在用 dsh-events 读 harness 里的 SessionEventMap，
+#  那才是「这份安装到底认识什么」的权威来源。
+# ============================================================
+KNOWN_EVENTS=""
+EVENTS_SOURCE="none"
+if have dsh-events; then
+  KNOWN_EVENTS=$(dsh-events 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+  [ -n "$KNOWN_EVENTS" ] && EVENTS_SOURCE="harness"
+fi
+# session 是日志头事件，永远合法，不在 SessionEventMap 里
+KNOWN_EVENTS="$KNOWN_EVENTS session"
+if [ -z "$KNOWN_EVENTS" ]; then
+  # 兜底：这份列表只能当参考，明确标出来，不假装权威
+  KNOWN_EVENTS="session step/start step/end turn/start turn/end assistant/message
 assistant/attempt tool/call tool/result user/message system/message developer/message
 session/title session/title-llm-request session/end-seed model/selection request/header
 request/context llm/retry llm/retry-started compaction/start compaction/end
@@ -60,6 +85,8 @@ compaction/summary compaction/prune agent/inbox/spliced agent-preset/selected
 job/registered job/settled todo/write goal/change permission/preset sandbox/mode
 approval/policy workspace/changes deliverables/presented web/deepseek-search-llm-request
 session-log-deepseek/delivery-accepted"
+  EVENTS_SOURCE="fallback"
+fi
 KNOWN_SESSION_FORMATS="v4"
 
 NOW=$(date +%s)
@@ -112,7 +139,7 @@ if [ "$N_SESS" -gt 0 ]; then
       printf 'UNREADABLE\t%s\n' "$f" >> "$T/issues"
       continue
     fi
-    # seq 连续性 + 未知事件
+    # seq 连续性 + 事件类型分类
     KNOWN_EVENTS="$KNOWN_EVENTS" python3 - "$T/one.jsonl" "$f" <<'PY' >> "$T/issues"
 import json, os, sys
 src, path = sys.argv[1], sys.argv[2]
@@ -130,8 +157,9 @@ for line in open(src, encoding='utf-8'):
             gap_at = (prev, s)
         prev = s
     t = d.get('type') or ''
+    # 不在 harness 核心表里 —— 只说「非核心」，不说「有问题」
     if t and t not in known:
-        print(f"UNKNOWN\t{path}\t{t}")
+        print(f"NONCORE\t{path}\t{t}")
 if gap_at:
     print(f"GAP\t{path}\t{gap_at[0]}\t{gap_at[1]}")
 PY
@@ -140,13 +168,13 @@ fi
 
 UNREADABLE=$(grep -c '^UNREADABLE' "$T/issues" 2>/dev/null || true)
 GAPS=$(grep -c '^GAP' "$T/issues" 2>/dev/null || true)
-UNK_TYPES=$(grep '^UNKNOWN' "$T/issues" 2>/dev/null | cut -f3 | sort -u | tr '\n' ' ' | sed 's/ $//')
-UNK_COUNT=$(grep -c '^UNKNOWN' "$T/issues" 2>/dev/null || true)
+NC_TYPES=$(grep '^NONCORE' "$T/issues" 2>/dev/null | cut -f3 | sort -u | tr '\n' ' ' | sed 's/ $//')
+NC_COUNT=$(grep -c '^NONCORE' "$T/issues" 2>/dev/null || true)
 
-UNREADABLE=${UNREADABLE:-0}; GAPS=${GAPS:-0}; UNK_COUNT=${UNK_COUNT:-0}
+UNREADABLE=${UNREADABLE:-0}; GAPS=${GAPS:-0}; NC_COUNT=${NC_COUNT:-0}
 case "$UNREADABLE" in *[!0-9]*|"") UNREADABLE=0;; esac
 case "$GAPS" in *[!0-9]*|"") GAPS=0;; esac
-case "$UNK_COUNT" in *[!0-9]*|"") UNK_COUNT=0;; esac
+case "$NC_COUNT" in *[!0-9]*|"") NC_COUNT=0;; esac
 
 # ---- 3. 备份新鲜度 ----
 LAST_BK=$(ls -t /sdcard/Download/dsh-backup/dsh-backup-*.tar.gz 2>/dev/null | head -1)
@@ -160,7 +188,7 @@ fi
 #  输出
 # ============================================================
 if [ "$MODE" = "json" ]; then
-  python3 - "$TOOLS_VERSION" "$APPV" "$FMT" "$N_SESS" "$GAPS" "$UNK_COUNT" "$UNK_TYPES" "$UNREADABLE" "$BK_AGE" "$LAST_BK" <<'PY'
+  python3 - "$TOOLS_VERSION" "$APPV" "$FMT" "$N_SESS" "$GAPS" "$NC_COUNT" "$NC_TYPES" "$UNREADABLE" "$BK_AGE" "$LAST_BK" <<'PY'
 import json, sys
 a, appv, fmt, n, gaps, unk, unkt, unr, age, bk = sys.argv[1:11]
 print(json.dumps({
@@ -196,7 +224,13 @@ else
 fi
 [ "$UNREADABLE" -gt 0 ] && say "  读不了:     ❌ $UNREADABLE 个" || say "  读不了:     ✅ 0"
 [ "$GAPS" -gt 0 ]       && say "  seq 断档:   ⚠️  $GAPS 个" || say "  seq 断档:   ✅ 0"
-[ "$UNK_COUNT" -gt 0 ]  && say "  未知事件:   ⚠️  $UNK_COUNT 条（$UNK_TYPES）" || say "  未知事件:   ✅ 0"
+[ "$NC_COUNT" -gt 0 ]  && say "  非核心事件: ℹ️  $NC_COUNT 条（$NC_TYPES）" || say "  非核心事件: ✅ 0"
+case "$EVENTS_SOURCE" in
+  harness)  say "  事件表:     取自已安装的 harness（$(printf '%s' "$KNOWN_EVENTS" | wc -w) 种）" ;;
+  fallback) say "  事件表:     ⚠️  读不到 harness，用的是内置参考列表"
+            say "              结论可能不准 —— 装了 dsh-events 才可靠" ;;
+  *)        say "  事件表:     ❌ 不可用" ;;
+esac
 say ""
 say "备份"
 if [ "$BK_AGE" -lt 0 ]; then
@@ -207,11 +241,22 @@ else
   say "  最近备份:   ✅ $BK_AGE 天前  $(basename "$LAST_BK")"
 fi
 
-TOTAL_PROB=$((UNREADABLE + GAPS + UNK_COUNT))
+TOTAL_PROB=$((UNREADABLE + GAPS))
 say ""
 say "──────────────────────────────────────"
 if [ "$TOTAL_PROB" -eq 0 ]; then
-  say "✅ 没发现问题"
+  say "✅ 没发现「确定的问题」（seq 断档 0，文件都能解开）"
+  if [ "$NC_COUNT" -gt 0 ]; then
+    say ""
+    say "ℹ️  但有 $NC_COUNT 条非核心事件（上面列了类型）。"
+    say "   工具**无法**判断这些会不会让应用读不了 —— 插件事件和"
+    say "   新版本事件长得一样。"
+    say ""
+    say "   如果你确实打不开某个会话，看应用报的错："
+    say '     contains event type "xxx" unknown to this harness'
+    say "   把那个 xxx 交给："
+    say "     dsh-doctor --fix --strip-type xxx"
+  fi
   exit 0
 fi
 
@@ -227,19 +272,28 @@ if [ "$GAPS" -gt 0 ]; then
   grep '^GAP' "$T/issues" | cut -f2 | sed "s|$SESS/|     |" | head -5
   say ""
 fi
-if [ "$UNK_COUNT" -gt 0 ]; then
-  say "  ⚠️  未知事件（可自动剥离）: $UNK_TYPES"
-  grep '^UNKNOWN' "$T/issues" | cut -f3 | sort | uniq -c | sed 's/^/     /'
+if [ "$NC_COUNT" -gt 0 ]; then
+  say "  ℹ️  非核心事件（仅供参考，**不建议**自动剥离）:"
+  grep '^NONCORE' "$T/issues" | cut -f3 | sort | uniq -c | sed 's/^/     /'
+  say ""
+  say "     这些不在 harness 核心表里。可能是插件事件，也可能是"
+  say "     新版本引入的。**两者长得一样，工具分不出来。**"
+  say ""
+  say "     判断方法：应用打开某个会话时如果报"
+  say "       contains event type \"xxx\" unknown to this harness"
+  say "     那个 xxx 就是真凶。把它显式交给 dsh-strip："
+  say "       dsh-doctor --fix --strip-type xxx"
   say ""
 fi
 
 if [ "$MODE" = "check" ]; then
   say "修复方案:"
   [ "$GAPS" -gt 0 ]      && say "  dsh-repair        # 重排 seq，内容不丢"
-  [ "$UNK_COUNT" -gt 0 ] && say "  dsh-strip <文件> $UNK_TYPES"
+  [ -n "$STRIP_TYPE" ]   && say "  dsh-strip <文件> $STRIP_TYPE"
   say ""
-  say "或者一条命令全修:"
-  say "  dsh-doctor --fix"
+  say "或者:"
+  say "  dsh-doctor --fix                      # 只修 seq 断档（安全）"
+  say "  dsh-doctor --fix --strip-type <类型>  # 再剥掉指定类型"
   say ""
   say "⚠️  修改前会先停 Web（会话文件是活的），并备份成 *.before-doctor"
   exit 1
@@ -288,14 +342,14 @@ if [ "$GAPS" -gt 0 ]; then
 fi
 
 # --- 剥未知事件 ---
-if [ "$UNK_COUNT" -gt 0 ]; then
-  say "  ▸ 剥未知事件: $UNK_TYPES"
+if [ -n "$STRIP_TYPE" ]; then
+  say "  ▸ 剥指定事件类型:$STRIP_TYPE"
   printf '%s\n' "$SESS_FILES" | while IFS= read -r f; do
     [ -n "$f" ] || continue
-    grep -q "^UNKNOWN	$f	" "$T/issues" 2>/dev/null || continue
+    :
     if have dsh-strip; then
       say "     $(basename "$(dirname "$f")")"
-      dsh-strip "$f" $UNK_TYPES 2>&1 | grep -E "保留|残留" | sed 's/^/       /'
+      dsh-strip "$f" $STRIP_TYPE 2>&1 | grep -E "保留|残留" | sed 's/^/       /'
       [ -f "$f.stripped" ] && mv "$f.stripped" "$f"
     else
       say "     ⚠️  没装 dsh-strip，跳过"

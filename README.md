@@ -480,6 +480,46 @@ dsh-doctor --rollback    # 一键回退
 **安全**：默认零写入；`--fix` 前先存 `*.before-doctor`；
 检测到 Web 在跑会拦下来（会话文件是活的）。
 
+### ⚠️ 它判断不了的事
+
+工具只能确定两件事：**seq 断档**和**文件能不能解开**。
+
+**「某个事件类型会不会让应用读不了」它判断不了** —— 因为：
+
+| 来源 | 特征 |
+| --- | --- |
+| 插件产生的事件 | 不在 harness 核心表里 |
+| 新版本引入的事件 | 也不在 harness 核心表里 |
+
+**两者长得完全一样。**
+
+所以它把不在核心表里的事件标成「非核心事件」，**只报告，不自动剥**。
+
+真正确认只能看应用报的错：
+
+```
+contains event type "job/registered" (seq 14511)
+unknown to this harness and not marked ignorable
+```
+
+把报错里的类型名交给：
+
+```bash
+dsh-doctor --fix --strip-type job/registered
+```
+
+### dsh-events
+
+想知道当前这份安装认识哪些事件类型：
+
+```bash
+dsh-events                      # 一行一个
+dsh-events --count              # 个数
+dsh-events --check job/registered   # 认不认识
+```
+
+**权威来源是 harness 里的 `SessionEventMap` 接口声明**，不是写死的列表。
+
 ---
 
 ## 🔪 降级后旧对话打不开？用 dsh-strip
