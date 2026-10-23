@@ -21,14 +21,43 @@
 #  其它内容一行不动。
 #
 #  用法:
-#    dsh-strip <session.v4.jsonl.zstd> <类型> [类型...]
-#    dsh-strip --list <session.v4.jsonl.zstd>     # 只看有哪些类型
-#    dsh-strip --dry-run <文件> <类型...>          # 只看会删多少
+#    dsh-strip --mark <文件> <类型> [类型...]      # 打 ignorable 标记（推荐）
+#    dsh-strip --list <文件>                       # 只看有哪些事件类型
+#    dsh-strip --dry-run <文件> <类型...>          # 只看会做什么，不写盘
+#    dsh-strip <文件> <类型...>                    # 删除+重排 seq（有风险）
 #
 #  例:
-#    dsh-strip session.v4.jsonl.zstd job/registered job/settled
+#    dsh-strip --mark session.v4.jsonl.zstd job/registered job/settled
 # ============================================================
 set -u
+
+show_help() {
+  cat <<'HLP'
+dsh-strip —— 处理会话日志里的事件类型
+
+用法:
+  dsh-strip --mark <文件> <类型> [类型...]   打 ignorable 标记（推荐，不删行不重排）
+  dsh-strip --list <文件>                    列出日志里所有事件类型及条数
+  dsh-strip --dry-run <文件> <类型...>       预演，不写盘
+  dsh-strip <文件> <类型...>                 删除事件并重排 seq（旧行为，有风险）
+
+说明:
+  --mark     给指定类型的事件加 "ignorable": true。harness 看到这个
+             标记会跳过该事件 —— 这是官方支持的放行方式，不删任何行、
+             不改 seq，最安全。
+  直接传类型 会删除事件并重排 seq。1.5.x 之前是默认行为，实测会导致
+             应用内部计数器不同步、会话从列表消失。除非明确需要，别用。
+
+例:
+  dsh-strip --mark session.v4.jsonl.zstd job/registered job/settled
+  dsh-strip --list session.v4.jsonl.zstd
+
+环境变量:
+  DSH_HARNESS_ROOTS   覆盖 harness 搜索路径（调试用）
+  exit 0
+
+HLP
+}
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '⚠️  %s\n' "$*" >&2; }
@@ -36,11 +65,13 @@ die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
 
 DRY=0
 MODE="strip"
-MARK=0          # 1 = 只打 ignorable 标记，不删不重排
+MARK=0
+SHOWHELP=0          # 1 = 只打 ignorable 标记，不删不重排
 ARGS=""
 for a in "$@"; do
   case "$a" in
     --list)    MODE="list" ;;
+    -h|--help) SHOWHELP=1 ;;
     --dry-run) DRY=1 ;;
     --mark)    MARK=1 ;;
     -*)        die "不认识的选项: $a" ;;
@@ -53,7 +84,8 @@ done
 FILE=$(printf '%s' "$ARGS" | sed -n '2p')
 TYPES=$(printf '%s' "$ARGS" | sed '1,2d' | tr '\n' ' ' | sed 's/ *$//')
 
-[ -n "$FILE" ] || die "用法: dsh-strip <session.v4.jsonl.zstd> <类型> [类型...]"
+[ "$SHOWHELP" = "1" ] && show_help
+[ -n "$FILE" ] || die "用法: dsh-strip --mark <文件> <类型...>   （--help 看全部）"
 [ -f "$FILE" ] || die "找不到文件: $FILE"
 command -v zstd >/dev/null 2>&1 || die "需要 zstd"
 command -v python3 >/dev/null 2>&1 || die "需要 python3"

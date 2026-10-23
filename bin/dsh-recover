@@ -1,0 +1,267 @@
+#!/bin/sh
+# ============================================================
+#  dsh-recover —— 自包含的会话修复
+#
+#  干什么：
+#    自动找到「被改坏」的会话（seq 断档），用它的完好备份恢复，
+#    再给不认识的事件打 ignorable 标记（不删行、不重排）。
+#
+#  为什么需要它：
+#    1.5.x 的 dsh-strip 是「删事件 + 重排 seq」。它和应用内部
+#    的计数器不同步 —— 剥完之后应用继续写，会留下断档，导致
+#    整个会话从列表里消失。
+#
+#    正确的做法是打 ignorable 标记（harness 官方支持的放行方式），
+#    一行都不用删。
+#
+#  用法:
+#    dsh-recover                       只检查，列出能救的会话（安全）
+#    dsh-recover -v                    同时显示每个候选备份的状态
+#    dsh-recover --fix                 真的修（要先停 Web）
+#    dsh-recover --fix --mark-type job/registered
+#                                      指定要打标记的事件类型
+#
+#  安全：
+#    · 默认只读，什么都不改
+#    · --fix 前会把当前文件存成 *.before-recover
+#    · 检测到 Web 在跑会拒绝动手
+# ============================================================
+set -u
+
+TOOLS_VERSION="1.7.0"
+HOME_DIR="${HOME:-/root}"
+SESS="$HOME_DIR/.dsh/sessions"
+
+FIX=0
+VERBOSE=0
+IKNOW=0
+MARK_TYPES="job/registered job/settled"
+SKIP_NEXT=0
+for a in "$@"; do
+  if [ "$SKIP_NEXT" = "1" ]; then MARK_TYPES="$a"; SKIP_NEXT=0; continue; fi
+  case "$a" in
+    --fix)         FIX=1 ;;
+    --i-know)      IKNOW=1 ;;
+    -v|--verbose)  VERBOSE=1 ;;
+    --mark-type)   SKIP_NEXT=1 ;;
+    --mark-type=*) MARK_TYPES="${a#*=}" ;;
+    -h|--help)     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) printf '❌ 不认识的选项: %s\n' "$a" >&2; exit 1 ;;
+  esac
+done
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf '⚠️  %s\n' "$*" >&2; }
+die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+[ -d "$SESS" ] || die "找不到 $SESS"
+have python3 || die "需要 python3"
+have zstd    || die "需要 zstd"
+
+T=$(mktemp -d "${TMPDIR:-/tmp}/dsh-recover.XXXXXX")
+trap 'rm -rf "$T"' EXIT INT TERM
+
+# ------------------------------------------------------------
+#  分析一个日志文件：条数、seq 范围、断点数、打标数
+#  输出一行:  lines<TAB>min<TAB>max<TAB>gaps<TAB>marked<TAB>status
+# ------------------------------------------------------------
+analyze() {
+  python3 - "$1" <<'PY' 2>/dev/null
+import json, subprocess, sys
+p = sys.argv[1]
+try:
+    r = subprocess.run(['zstd','-dc',p], capture_output=True, timeout=600)
+except Exception:
+    print('0\t0\t0\t0\t0\tERR'); sys.exit(0)
+if r.returncode != 0:
+    print('0\t0\t0\t0\t0\tERR'); sys.exit(0)
+seqs, marked, bad = [], 0, 0
+for line in r.stdout.decode('utf-8','replace').splitlines():
+    line = line.strip()
+    if not line: continue
+    try: d = json.loads(line)
+    except Exception: bad += 1; continue
+    if isinstance(d.get('seq'), int): seqs.append(d['seq'])
+    if d.get('ignorable') is True: marked += 1
+if not seqs:
+    print(f'0\t0\t0\t0\t0\tNOSQ'); sys.exit(0)
+gaps = sum(1 for i in range(1,len(seqs)) if seqs[i] != seqs[i-1]+1)
+status = 'OK' if gaps == 0 and bad == 0 else 'BAD'
+print(f'{len(seqs)}\t{seqs[0]}\t{seqs[-1]}\t{gaps}\t{marked}\t{status}')
+PY
+}
+
+# ------------------------------------------------------------
+#  找出所有会话目录
+# ------------------------------------------------------------
+say "🩺 dsh-recover $TOOLS_VERSION"
+say ""
+say "会话根: $SESS"
+
+FOUND=0
+PLAN="$T/plan"
+: > "$PLAN"
+
+for d in "$SESS"/*/session-*/; do
+  [ -d "$d" ] || continue
+  CUR="$d/session.v4.jsonl.zstd"
+  [ -f "$CUR" ] || continue
+
+  R=$(analyze "$CUR")
+  set -- $R
+  LINES=$1; MIN=$2; MAX=$3; GAPS=$4; MARKED=$5; ST=$6
+
+  [ "$ST" = "OK" ] && continue
+
+  FOUND=$((FOUND+1))
+  SID=$(basename "$d")
+
+  say ""
+  say "⚠️  $SID"
+  say "    当前: $LINES 条，seq $MIN..$MAX，断点 $GAPS"
+
+  # ---- 找候选备份 ----
+  BEST=""
+  BEST_SCORE=-1
+  BEST_DESC=""
+  for suffix in before-doctor before-repair before-strip before-recover; do
+    C="$CUR.$suffix"
+    [ -f "$C" ] || continue
+    RC=$(analyze "$C")
+    set -- $RC
+    CL=$1; CMIN=$2; CMAX=$3; CG=$4; CMRK=$5; CST=$6
+    DESC="$suffix: $CL 条 seq $CMIN..$CMAX 断点 $CG [$( [ "$CST" = OK ] && echo 完整 || echo 有问题 )]"
+    [ "$VERBOSE" = "1" ] && say "      $DESC"
+    # 打分：连续的优先，条数多的优先
+    SCORE=$CL
+    [ "$CST" = "OK" ] || SCORE=$((SCORE / 100))
+    if [ "$SCORE" -gt "$BEST_SCORE" ]; then
+      BEST_SCORE=$SCORE; BEST="$C"; BEST_DESC="$DESC"
+    fi
+  done
+
+  if [ -z "$BEST" ]; then
+    say "    ❌ 没有可用的备份（.before-doctor / .before-repair 都不在）"
+    say "       这个会话只能手工处理，或者从旧手机重新导一份"
+    continue
+  fi
+
+  set -- $(analyze "$BEST")
+  BL=$1; BMIN=$2; BMAX=$3; BG=$4; BMRK=$5; BST=$6
+  if [ "$BST" != "OK" ]; then
+    say "    ⚠️  最好的备份也不连续（断点 $BG），先别用它"
+    say "        备份: $BEST"
+    continue
+  fi
+
+  say "    ✅ 可恢复: $BEST_DESC"
+  if [ "$BMRK" -gt 0 ]; then
+    say "       注意：它已经带了 $BMRK 条 ignorable 标记"
+  fi
+  printf '%s\t%s\t%s\n' "$d" "$BEST" "$SID" >> "$PLAN"
+done
+
+say ""
+say "──────────────────────────────────────"
+if [ "$FOUND" -eq 0 ]; then
+  say "✅ 没有发现断档的会话"
+  exit 0
+fi
+
+say "发现 $FOUND 个有问题的会话"
+NPLAN=$(wc -l < "$PLAN" 2>/dev/null || echo 0)
+say "其中 $NPLAN 个能自动恢复"
+
+if [ "$NPLAN" -eq 0 ]; then
+  say ""
+  say "没有可自动恢复的。可能的原因："
+  say "  · 备份已被删掉"
+  say "  · 备份本身也坏了"
+  say ""
+  say "建议：从旧手机重新导一份干净的"
+  exit 1
+fi
+
+if [ "$FIX" = "0" ]; then
+  say ""
+  say "修复方式（会先停 Web）："
+  say "  dsh-recover --fix"
+  say ""
+  say "要对哪些类型打 ignorable 标记（当前: $MARK_TYPES）："
+  say "  dsh-recover --fix --mark-type job/registered"
+  say ""
+  say "⚠️  修复前会把当前文件存成 *.before-recover"
+  exit 1
+fi
+
+# ============================================================
+#  --fix
+# ============================================================
+say ""
+say "🔧 开始修复"
+say ""
+
+# ---- Web 在跑就不动手 ----
+if [ "$IKNOW" = "0" ] && ps -eo args 2>/dev/null | grep -q "dsh-web\|dsh web" ; then
+  warn "检测到 Web 还在运行。"
+  warn "会话文件是活的，边读边写 —— 现在改会读到写了一半的状态。"
+  warn ""
+  warn "请先在应用里 停止 Web，然后重新执行："
+  warn "  dsh-recover --fix"
+  exit 1
+fi
+
+have dsh-strip || die "需要 dsh-strip（dsh-tools 1.6.0 以上）"
+# 确认 dsh-strip 支持 --mark
+if ! dsh-strip --help 2>/dev/null | grep -q -- "--mark"; then
+  die "dsh-strip 太旧，不支持 --mark。先升级 dsh-tools 到 1.6.0 以上。"
+fi
+
+OKN=0
+FAILN=0
+while IFS="$(printf '\t')" read -r DIR SRC SID; do
+  [ -n "$DIR" ] || continue
+  CUR="$DIR/session.v4.jsonl.zstd"
+  say "  ▸ $SID"
+
+  # 1. 保底备份
+  cp -a "$CUR" "$CUR.before-recover" 2>/dev/null || true
+
+  # 2. 用干净原件覆盖
+  cp -a "$SRC" "$CUR" || { say "     ❌ 复制失败"; FAILN=$((FAILN+1)); continue; }
+
+  # 3. 打 ignorable 标记（不删行、不重排）
+  if dsh-strip --mark "$CUR" $MARK_TYPES > "$T/out" 2>&1; then
+    if [ -f "$CUR.stripped" ]; then
+      mv "$CUR.stripped" "$CUR"
+    fi
+    grep -E "打 ignorable|保留" "$T/out" | sed 's/^/     /'
+  else
+    say "     ⚠️  打标记失败，见下："
+    sed 's/^/       /' "$T/out"
+    FAILN=$((FAILN+1)); continue
+  fi
+
+  # 4. 复查
+  R=$(analyze "$CUR")
+  set -- $R
+  L=$1; MN=$2; MX=$3; G=$4; MK=$5; S=$6
+  if [ "$S" = "OK" ]; then
+    say "     ✅ $L 条  seq $MN..$MX  断点 0  打标记 $MK 条"
+    OKN=$((OKN+1))
+  else
+    say "     ❌ 复查不过：$L 条 seq $MN..$MX 断点 $G"
+    FAILN=$((FAILN+1))
+  fi
+done < "$PLAN"
+
+say ""
+say "──────────────────────────────────────"
+say "✅ 成功 $OKN 个"
+[ "$FAILN" -gt 0 ] && say "❌ 失败 $FAILN 个"
+say ""
+say "下一步：启动 Web，打开那个会话看看。"
+say ""
+say "回退（如果还是不行）："
+say "  把 *.before-recover 改名回 session.v4.jsonl.zstd"
