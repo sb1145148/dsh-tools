@@ -25,7 +25,7 @@ say ""
 mkdir -p "$PREFIX" 2>/dev/null || true
 [ -w "$PREFIX" ] || { say "❌ $PREFIX 不可写。加 sudo，或换 --prefix ~/bin"; exit 1; }
 
-for f in dsh-backup dsh-restore dsh-repair dsh-strip; do
+for f in dsh-backup dsh-restore dsh-repair dsh-strip dsh-doctor; do
   if [ -e "$PREFIX/$f" ]; then
     mv "$PREFIX/$f" "$PREFIX/$f.old"
     say "   💾 旧版存为 $f.old"

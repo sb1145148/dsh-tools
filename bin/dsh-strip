@@ -127,7 +127,13 @@ say "🗜  压缩..."
 zstd -q -f -19 -o "$OUT" "$T/out.jsonl" 2>/dev/null || die "压缩失败"
 
 # ---------- 自检 ----------
-LEFT=$(zstd -dc "$OUT" 2>/dev/null | grep -c -E '"type":"(job/registered|job/settled)"' 2>/dev/null || true)
+# 用实际剥离的类型做残留检查，不要写死
+PAT=$(printf '%s' "$TYPES" | tr ' ' '\n' | sed 's/[][()*+?.^$|\\]/\\&/g' | grep . | paste -sd'|' -)
+if [ -n "$PAT" ]; then
+  LEFT=$(zstd -dc "$OUT" 2>/dev/null | grep -c -E "\"type\":\"($PAT)\"" 2>/dev/null || true)
+else
+  LEFT=0
+fi
 LEFT=${LEFT:-0}
 N=$(zstd -dc "$OUT" 2>/dev/null | wc -l)
 

@@ -1,0 +1,314 @@
+#!/bin/sh
+# ============================================================
+#  dsh-doctor —— 一条命令体检 + 自动修
+#
+#  用法:
+#    dsh-doctor              只体检，列出问题（安全，默认）
+#    dsh-doctor --fix        体检 + 自动修能修的
+#    dsh-doctor --json       机器可读
+#
+#  能自动修的:
+#    · seq 断档        → dsh-repair
+#    · 未知事件类型     → dsh-strip
+#
+#  只报告、不自动修的:
+#    · 会话格式变了（v4 → v5）—— 需要人工确认
+#    · 文件读不了 / 解压失败
+#    · 太久没备份
+#
+#  安全模型:
+#    · 默认不写任何东西
+#    · --fix 前每个会话都先备份成 *.before-doctor
+#    · 出问题用 dsh-doctor --rollback 回退
+# ============================================================
+set -u
+
+TOOLS_VERSION="1.4.0"
+HOME_DIR="${HOME:-/root}"
+DSH="$HOME_DIR/.dsh"
+SESS="$DSH/sessions"
+
+MODE="check"
+for a in "$@"; do
+  case "$a" in
+    --fix)      MODE="fix" ;;
+    --json)     MODE="json" ;;
+    --rollback) MODE="rollback" ;;
+    --i-know)   : ;;              # 配合 --fix，跳过「Web 还在跑」的拦截
+    -h|--help)
+      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) printf '❌ 不认识的选项: %s\n' "$a" >&2; exit 1 ;;
+  esac
+done
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf '⚠️  %s\n' "$*" >&2; }
+die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+[ -d "$DSH" ] || die "找不到 $DSH"
+have zstd    || die "需要 zstd"
+have python3 || die "需要 python3"
+
+# 已知事件类型（随版本更新）
+KNOWN_EVENTS="session step/start step/end turn/start turn/end assistant/message
+assistant/attempt tool/call tool/result user/message system/message developer/message
+session/title session/title-llm-request session/end-seed model/selection request/header
+request/context llm/retry llm/retry-started compaction/start compaction/end
+compaction/summary compaction/prune agent/inbox/spliced agent-preset/selected
+job/registered job/settled todo/write goal/change permission/preset sandbox/mode
+approval/policy workspace/changes deliverables/presented web/deepseek-search-llm-request
+session-log-deepseek/delivery-accepted"
+KNOWN_SESSION_FORMATS="v4"
+
+NOW=$(date +%s)
+
+# ============================================================
+#  --rollback
+# ============================================================
+if [ "$MODE" = "rollback" ]; then
+  N=0
+  find "$SESS" -name '*.before-doctor' -type f 2>/dev/null | while IFS= read -r f; do
+    t="${f%.before-doctor}"
+    [ -f "$t" ] && cp -a "$f" "$t" && printf '  ↩︎  %s\n' "${t#$SESS/}"
+  done
+  say "✅ 已回退（*.before-doctor → 原文件）"
+  exit 0
+fi
+
+# ============================================================
+#  各项检查
+# ============================================================
+T=$(mktemp -d "${TMPDIR:-/tmp}/dsh-doctor.XXXXXX")
+trap 'rm -rf "$T"' EXIT INT TERM
+
+: > "$T/issues"
+
+# ---- 1. 环境 ----
+APPV=$(timeout 8 curl -s -H @/root/.dsh/.bridge_headers "http://127.0.0.1:3090/app/version" 2>/dev/null \
+       | sed -n 's/.*APP_VERSION=\([^\\]*\).*/\1/p' | head -1)
+APPV=${APPV:-未知}
+MISS=""
+for c in tar stat find cp sed grep head mktemp zstd python3; do
+  have "$c" || MISS="$MISS $c"
+done
+
+# ---- 2. 会话 ----
+SESS_FILES=$(find "$SESS" -type f -name 'session.v*.jsonl.zstd' 2>/dev/null)
+N_SESS=$(printf '%s\n' "$SESS_FILES" | grep -c . || true)
+FMT=$(printf '%s\n' "$SESS_FILES" | sed -n 's|.*/session\.\(v[0-9][0-9]*\)\.jsonl\.zstd$|\1|p' | sort -u | tr '\n' ' ' | sed 's/ $//')
+
+UNREADABLE=0
+BAD_SEQ=0
+UNKNOWN_EV=0
+TOTAL_EV=0
+
+if [ "$N_SESS" -gt 0 ]; then
+  printf '%s\n' "$SESS_FILES" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    # 能不能读 + 解压
+    if ! zstd -dc "$f" > "$T/one.jsonl" 2>/dev/null; then
+      printf 'UNREADABLE\t%s\n' "$f" >> "$T/issues"
+      continue
+    fi
+    # seq 连续性 + 未知事件
+    KNOWN_EVENTS="$KNOWN_EVENTS" python3 - "$T/one.jsonl" "$f" <<'PY' >> "$T/issues"
+import json, os, sys
+src, path = sys.argv[1], sys.argv[2]
+known = set(os.environ["KNOWN_EVENTS"].split())
+prev = 0
+gap_at = None
+for line in open(src, encoding='utf-8'):
+    line = line.strip()
+    if not line: continue
+    try: d = json.loads(line)
+    except Exception: continue
+    s = d.get('seq')
+    if isinstance(s, int):
+        if gap_at is None and prev and s != prev + 1:
+            gap_at = (prev, s)
+        prev = s
+    t = d.get('type') or ''
+    if t and t not in known:
+        print(f"UNKNOWN\t{path}\t{t}")
+if gap_at:
+    print(f"GAP\t{path}\t{gap_at[0]}\t{gap_at[1]}")
+PY
+  done
+fi
+
+UNREADABLE=$(grep -c '^UNREADABLE' "$T/issues" 2>/dev/null || true)
+GAPS=$(grep -c '^GAP' "$T/issues" 2>/dev/null || true)
+UNK_TYPES=$(grep '^UNKNOWN' "$T/issues" 2>/dev/null | cut -f3 | sort -u | tr '\n' ' ' | sed 's/ $//')
+UNK_COUNT=$(grep -c '^UNKNOWN' "$T/issues" 2>/dev/null || true)
+
+UNREADABLE=${UNREADABLE:-0}; GAPS=${GAPS:-0}; UNK_COUNT=${UNK_COUNT:-0}
+case "$UNREADABLE" in *[!0-9]*|"") UNREADABLE=0;; esac
+case "$GAPS" in *[!0-9]*|"") GAPS=0;; esac
+case "$UNK_COUNT" in *[!0-9]*|"") UNK_COUNT=0;; esac
+
+# ---- 3. 备份新鲜度 ----
+LAST_BK=$(ls -t /sdcard/Download/dsh-backup/dsh-backup-*.tar.gz 2>/dev/null | head -1)
+if [ -n "$LAST_BK" ]; then
+  BK_AGE=$(( (NOW - $(stat -c %Y "$LAST_BK" 2>/dev/null || echo "$NOW")) / 86400 ))
+else
+  BK_AGE=-1
+fi
+
+# ============================================================
+#  输出
+# ============================================================
+if [ "$MODE" = "json" ]; then
+  python3 - "$TOOLS_VERSION" "$APPV" "$FMT" "$N_SESS" "$GAPS" "$UNK_COUNT" "$UNK_TYPES" "$UNREADABLE" "$BK_AGE" "$LAST_BK" <<'PY'
+import json, sys
+a, appv, fmt, n, gaps, unk, unkt, unr, age, bk = sys.argv[1:11]
+print(json.dumps({
+  "tools_version": a, "app_version": appv, "session_format": fmt,
+  "sessions": int(n or 0), "seq_gaps": int(gaps or 0),
+  "unknown_events": int(unk or 0), "unknown_types": unkt.split(),
+  "unreadable": int(unr or 0), "backup_age_days": int(age),
+  "last_backup": bk or None,
+  "problems": int(gaps or 0) + int(unk or 0) + int(unr or 0),
+}, ensure_ascii=False, indent=2))
+PY
+  exit 0
+fi
+
+say "🩺 dsh-doctor $TOOLS_VERSION"
+say ""
+say "环境"
+say "  dsh 目录:   $DSH"
+say "  应用版本:   $APPV"
+if [ -n "$MISS" ]; then
+  say "  依赖:       ⚠️  缺:$MISS"
+else
+  say "  依赖:       ✅ 齐全"
+fi
+say ""
+say "会话（$N_SESS 个）"
+if [ -z "$FMT" ]; then
+  say "  格式:       —（没有会话）"
+elif [ "$FMT" = "$KNOWN_SESSION_FORMATS" ]; then
+  say "  格式:       $FMT ✅"
+else
+  say "  格式:       $FMT ❌ 不认识（支持 $KNOWN_SESSION_FORMATS）"
+fi
+[ "$UNREADABLE" -gt 0 ] && say "  读不了:     ❌ $UNREADABLE 个" || say "  读不了:     ✅ 0"
+[ "$GAPS" -gt 0 ]       && say "  seq 断档:   ⚠️  $GAPS 个" || say "  seq 断档:   ✅ 0"
+[ "$UNK_COUNT" -gt 0 ]  && say "  未知事件:   ⚠️  $UNK_COUNT 条（$UNK_TYPES）" || say "  未知事件:   ✅ 0"
+say ""
+say "备份"
+if [ "$BK_AGE" -lt 0 ]; then
+  say "  最近备份:   ⚠️  没有"
+elif [ "$BK_AGE" -ge 30 ]; then
+  say "  最近备份:   ⚠️  $BK_AGE 天前"
+else
+  say "  最近备份:   ✅ $BK_AGE 天前  $(basename "$LAST_BK")"
+fi
+
+TOTAL_PROB=$((UNREADABLE + GAPS + UNK_COUNT))
+say ""
+say "──────────────────────────────────────"
+if [ "$TOTAL_PROB" -eq 0 ]; then
+  say "✅ 没发现问题"
+  exit 0
+fi
+
+say "发现 $TOTAL_PROB 个问题"
+say ""
+if [ "$UNREADABLE" -gt 0 ]; then
+  say "  ❌ 读不了的文件（工具帮不上，需要看具体报错）:"
+  grep '^UNREADABLE' "$T/issues" | cut -f2 | sed "s|$SESS/|     |" | head -5
+  say ""
+fi
+if [ "$GAPS" -gt 0 ]; then
+  say "  ⚠️  seq 断档（可自动修）:"
+  grep '^GAP' "$T/issues" | cut -f2 | sed "s|$SESS/|     |" | head -5
+  say ""
+fi
+if [ "$UNK_COUNT" -gt 0 ]; then
+  say "  ⚠️  未知事件（可自动剥离）: $UNK_TYPES"
+  grep '^UNKNOWN' "$T/issues" | cut -f3 | sort | uniq -c | sed 's/^/     /'
+  say ""
+fi
+
+if [ "$MODE" = "check" ]; then
+  say "修复方案:"
+  [ "$GAPS" -gt 0 ]      && say "  dsh-repair        # 重排 seq，内容不丢"
+  [ "$UNK_COUNT" -gt 0 ] && say "  dsh-strip <文件> $UNK_TYPES"
+  say ""
+  say "或者一条命令全修:"
+  say "  dsh-doctor --fix"
+  say ""
+  say "⚠️  修改前会先停 Web（会话文件是活的），并备份成 *.before-doctor"
+  exit 1
+fi
+
+# ============================================================
+#  --fix
+# ============================================================
+say "🔧 开始修复"
+say ""
+
+# 检查 Web 是否还在跑（活会话不要动）
+if pgrep -f "dsh.*web" >/dev/null 2>&1; then
+  warn "检测到 Web 还在运行。"
+  warn "会话文件是活的，边读边写 —— 现在改可能读到写了一半的状态。"
+  warn ""
+  warn "建议先在应用里 停止 Web，再跑 --fix。"
+  warn "确实要继续就加 --i-know："
+  warn "  dsh-doctor --fix --i-know"
+  case " $* " in
+    *" --i-know "*) warn "  已指定 --i-know，继续" ;;
+    *) exit 1 ;;
+  esac
+fi
+
+FIXED=0
+FAILED=0
+
+# --- 先备份所有要动的文件 ---
+printf '%s\n' "$SESS_FILES" | while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  [ -f "$f.before-doctor" ] || cp -a "$f" "$f.before-doctor" 2>/dev/null || true
+done
+say "  💾 已备份到 *.before-doctor"
+say ""
+
+# --- 修 seq 断档 ---
+if [ "$GAPS" -gt 0 ]; then
+  say "  ▸ 修 seq 断档..."
+  if have dsh-repair; then
+    dsh-repair 2>&1 | sed 's/^/     /'
+  else
+    say "     ⚠️  没装 dsh-repair，跳过"
+  fi
+  say ""
+fi
+
+# --- 剥未知事件 ---
+if [ "$UNK_COUNT" -gt 0 ]; then
+  say "  ▸ 剥未知事件: $UNK_TYPES"
+  printf '%s\n' "$SESS_FILES" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    grep -q "^UNKNOWN	$f	" "$T/issues" 2>/dev/null || continue
+    if have dsh-strip; then
+      say "     $(basename "$(dirname "$f")")"
+      dsh-strip "$f" $UNK_TYPES 2>&1 | grep -E "保留|残留" | sed 's/^/       /'
+      [ -f "$f.stripped" ] && mv "$f.stripped" "$f"
+    else
+      say "     ⚠️  没装 dsh-strip，跳过"
+    fi
+  done
+  say ""
+fi
+
+say "──────────────────────────────────────"
+say "✅ 修复完成"
+say ""
+say "回退:"
+say "  dsh-doctor --rollback"
+say ""
+say "验证:"
+say "  dsh-doctor"
