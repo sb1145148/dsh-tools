@@ -1,5 +1,109 @@
 # 更新日志
 
+## 1.8.0 — 2026-10-24
+
+**找到「还原完了但一个会话都看不到」的真正原因：不是文件，是索引。**
+
+### 根因
+
+应用的对话列表读的是 **`~/.dsh/storages/workspace.json` 里的 `sessionIds`**，
+**不是扫目录**。
+
+实测一台机器的状态：
+
+```
+磁盘上实际有:    11 个会话
+workspace.json:   只登记了 4 个
+                 ─────────────
+                 7 个「文件在、列表空」
+```
+
+而 `dsh-restore` 默认**不还原 `workspace.json`**（当时把它归为「状态文件，
+覆盖会弄坏新环境」）。所以：
+
+```
+还原 → 会话文件都搬过去了 ✅
+     → 索引里没有它们   ❌
+     → 应用列表空
+```
+
+**这也解释了「重开工作台会话消失」** —— 索引被重置，列表就空了，
+哪怕磁盘上一个文件都没少。
+
+### 新增 `dsh-reindex`
+
+```bash
+dsh-reindex            # 只报告：磁盘几个、索引几个、差哪些
+dsh-reindex --fix      # 补进索引（要先停 Web）
+```
+
+**输出：**
+
+```console
+🗂  dsh-reindex 1.8.0
+
+  ⚠️  /root/deepseek-harness    磁盘有、索引缺 7 个（索引 4）
+
+需要对齐。执行：
+  dsh-reindex --fix
+```
+
+**`--fix` 做三件事：**
+
+1. 把磁盘上缺的会话 ID 追加到 `workspace.json`
+2. 原文件存成 `workspace.json.before-reindex`
+3. 已有的条目一条不动
+
+**沙盒实测：**
+
+```
+补之前: sessionIds: ["session-aaa"]
+补之后: sessionIds: ["session-aaa", "session-bbb"]
+```
+
+### 设计上的两个保守点
+
+**① 路径只做正向映射**
+
+```
+/root/deepseek-harness  →  --root-deepseek-harness--
+```
+
+反过来推不行 —— 路径里的 `-` 和分隔符 `-` 分不清。
+所以磁盘上有会话、但 `workspace.json` 里没有对应工作区时，**只报告不编造**。
+
+**② 索引里有、磁盘没有的，也只报告不删**
+
+### `dsh-restore` 的结束提示改了
+
+现在会明确说：
+
+```
+⚠️  对话列表是空的？那多半是索引没跟上
+
+   应用读的是 ~/.dsh/storages/workspace.json 里的 sessionIds，
+   不是扫目录。还原只搬了会话文件，索引里没有它们。
+
+   修法（先停 Web）：
+     dsh-reindex
+     dsh-reindex --fix
+```
+
+### 现在 8 个工具
+
+`dsh-backup` / `dsh-restore` / `dsh-repair` / `dsh-strip` / `dsh-doctor` /
+`dsh-events` / `dsh-recover` / `dsh-reindex`
+
+### 一个反思
+
+前面几轮我一直在查「事件类型」「seq 断档」，那些都是真问题，**但都不是
+「一个都看不到」的原因**。
+
+索引这一层被我在设计 `dsh-restore` 时就排除掉了 —— 我把 `workspace.json`
+当成「状态文件，不能覆盖」。**它确实是状态文件，但不等于不能合并。**
+
+**排除得太干净，反而制造了新问题。**
+
 ## 1.7.0 — 2026-10-24
 
 **新增 `dsh-recover`：一条命令修好被改坏的会话。**

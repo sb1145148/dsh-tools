@@ -1,0 +1,183 @@
+#!/bin/sh
+# ============================================================
+#  dsh-reindex —— 把 workspace.json 的会话索引和磁盘对齐
+#
+#  症状：
+#    备份还原之后，会话文件都在，但应用里一个都看不到。
+#
+#  原因：
+#    对话列表读的是 ~/.dsh/storages/workspace.json 里的 sessionIds，
+#    **不是扫目录**。还原时如果不带 workspace.json（或者它被重置），
+#    索引里就没有这些会话 —— 文件在、列表空。
+#
+#  做法：
+#    扫磁盘上有哪些会话，把它们补进 workspace.json 对应的
+#    工作区里。已有的一条不动，只追加缺的。
+#
+#  用法:
+#    dsh-reindex             只报告差多少，不改
+#    dsh-reindex --fix       真的写回去（要先停 Web）
+# ============================================================
+set -u
+
+TOOLS_VERSION="1.8.0"
+HOME_DIR="${HOME:-/root}"
+DSH="$HOME_DIR/.dsh"
+SESS="$DSH/sessions"
+WS="$DSH/storages/workspace.json"
+
+FIX=0
+IKNOW=0
+for a in "$@"; do
+  case "$a" in
+    --fix)    FIX=1 ;;
+    --i-know) IKNOW=1 ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) printf '❌ 不认识的选项: %s\n' "$a" >&2; exit 1 ;;
+  esac
+done
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf '⚠️  %s\n' "$*" >&2; }
+die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+[ -d "$SESS" ] || die "找不到 $SESS"
+have python3 || die "需要 python3"
+
+say "🗂  dsh-reindex $TOOLS_VERSION"
+say ""
+
+if [ ! -f "$WS" ]; then
+  warn "没有 $WS"
+  warn "应用还没初始化过工作区。先打开一次应用再跑这个。"
+  exit 1
+fi
+
+RESULT=$(python3 - "$SESS" "$WS" "$FIX" <<'PY'
+import glob, json, os, shutil, sys, time
+
+sess_root, ws_path, fix = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
+
+try:
+    data = json.load(open(ws_path, encoding='utf-8'))
+except Exception as e:
+    print(f'ERR\t读不了 {ws_path}: {e}')
+    sys.exit(0)
+
+tables = data.get('tables', {}).get('workspaces', {})
+if not isinstance(tables, dict):
+    print('ERR\tworkspace.json 结构不认识')
+    sys.exit(0)
+
+# 磁盘上：key -> [sessionId...]
+disk = {}
+for d in glob.glob(os.path.join(sess_root, '*', 'session-*')):
+    if not os.path.isdir(d):
+        continue
+    key = os.path.basename(os.path.dirname(d))
+    sid = os.path.basename(d)
+    disk.setdefault(key, []).append(sid)
+
+# 正向映射才可靠：路径里的 '-' 和分隔符 '-' 分不清，不能反推。
+#   /root/deepseek-harness  ->  --root-deepseek-harness--
+def path_to_key(p):
+    q = p.strip('/')
+    return '--' + q.replace('/', '-') + '--'
+
+# 现有工作区：key -> wid
+by_key = {}
+for wid, w in tables.items():
+    p = w.get('path')
+    if isinstance(p, str) and p:
+        by_key[path_to_key(p)] = wid
+
+report = []
+changes = 0
+
+for key, sids in sorted(disk.items()):
+    wid = by_key.get(key)
+    path = tables[wid]['path'] if wid else None
+
+    if wid is None:
+        # 磁盘上有会话，但 workspace.json 里没有这个工作区。
+        # 路径没法从 key 反推（'-' 有歧义），所以只报告，不擅自编造。
+        report.append(f'NEWWS\t{key}\t{len(sids)}')
+        continue
+
+    w = tables[wid]
+    have_ids = w.get('sessionIds') or []
+    if not isinstance(have_ids, list):
+        have_ids = []
+    missing = [s for s in sids if s not in have_ids]
+
+    if missing:
+        report.append(f'MISS\t{path}\t{len(missing)}\t{len(have_ids)}\t{" ".join(sorted(missing))}')
+        changes += 1          # 计划改动数（只读模式也算，用来提示）
+        if fix:
+            w['sessionIds'] = have_ids + sorted(missing)
+            w['updatedAt'] = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime())
+    else:
+        report.append(f'OK\t{path}\t{len(have_ids)}')
+
+    # 索引里有、磁盘没有
+    gone = [s for s in have_ids if s not in sids]
+    if gone:
+        report.append(f'GONE\t{path}\t{len(gone)}\t{" ".join(sorted(gone))}')
+
+if fix and changes:
+    shutil.copy2(ws_path, ws_path + '.before-reindex')
+    tmp = ws_path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    os.replace(tmp, ws_path)
+
+print(f'CHANGES\t{changes}')
+for line in report:
+    print(line)
+PY
+)
+
+echo "$RESULT" | grep -v '^CHANGES' | while IFS="$(printf '\t')" read -r tag a b c d; do
+  case "$tag" in
+    OK)    printf "  ✅ %-36s 索引 %s 个，已对齐\n" "$a" "$b" ;;
+    MISS)  printf "  ⚠️  %-36s 磁盘有、索引缺 %s 个（索引 %s）\n" "$a" "$b" "$c" ;;
+    GONE)  printf "  ℹ️  %-36s 索引有、磁盘没有 %s 个\n" "$a" "$b" ;;
+    NEWWS) printf "  ⚠️  %s 下有 %s 个会话，但 workspace.json 里没有对应工作区\n" "$a" "$b"
+           printf "      （key 没法反推路径，去应用里打开一次那个目录就会自动建）\n" ;;
+
+    ERR)   printf "  ❌ %s\n" "$a" ;;
+  esac
+done
+
+CH=$(echo "$RESULT" | sed -n 's/^CHANGES\t//p')
+CH=${CH:-0}
+echo ""
+if [ "$FIX" = "0" ]; then
+  if [ "$CH" -gt 0 ] 2>/dev/null; then
+    say "需要对齐。执行："
+    say "  dsh-reindex --fix"
+    say ""
+    say "⚠️  先停 Web（应用里 停止 → 启动）"
+    exit 1
+  fi
+  say "✅ 索引和磁盘一致"
+  exit 0
+fi
+
+# ---- 写回 ----
+if [ "$IKNOW" = "0" ] && ps -eo args 2>/dev/null | grep -q "dsh-web\|dsh web"; then
+  warn "检测到 Web 还在运行。"
+  warn "workspace.json 是应用在管的，带 Web 改会被它覆盖回去。"
+  warn "请先 停止 Web，再跑 dsh-reindex --fix"
+  exit 1
+fi
+
+if [ "$CH" -gt 0 ] 2>/dev/null; then
+  say "✅ 已写回 workspace.json（原文件存为 workspace.json.before-reindex）"
+  say ""
+  say "下一步：启动 Web，看对话列表"
+else
+  say "✅ 没有需要改的"
+fi

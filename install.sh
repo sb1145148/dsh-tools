@@ -26,7 +26,7 @@ mkdir -p "$PREFIX" 2>/dev/null || true
 [ -w "$PREFIX" ] || { say "❌ $PREFIX 不可写。加 sudo，或换 --prefix ~/bin"; exit 1; }
 
 INSTALLED=""
-for f in dsh-backup dsh-restore dsh-repair dsh-strip dsh-doctor dsh-events dsh-recover; do
+for f in dsh-backup dsh-restore dsh-repair dsh-strip dsh-doctor dsh-events dsh-recover dsh-reindex; do
   # 包里缺这个就跳过，不要整个安装挂掉
   if [ ! -f "$HERE/bin/$f" ]; then
     say "   ⏭  $f（包里没有，跳过）"
