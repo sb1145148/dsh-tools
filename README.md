@@ -274,6 +274,36 @@ find /sdcard/Download -maxdepth 2 -name "*.tar.gz" 2>/dev/null
 | 文件在子目录里 | 路径少写一层 |
 | 传输没完成 | 大小对不上（比如只有几 MB） |
 | 文件名有空格或中文 | 命令里**必须加引号** |
+| **文件在，但读不了** | `ls` 列得出来，还原时报「读不出文件头」/`Permission denied` |
+
+---
+
+#### ⚠️ 特例：`ls` 看得到，但读不出来
+
+**`/sdcard` 是 FUSE 挂载，带 SELinux 和 uid 限制。** 环境里的 root 不是真 root：
+
+```
+ls -l  →  只查目录读权限  →  ✅ 能列出
+open() →  要真正打开文件  →  ❌ 被拒
+```
+
+**判断方法：**
+
+```bash
+ls -l "$F"                  # 有输出
+head -c 1 "$F" >/dev/null   # 报 Permission denied 就是这个
+```
+
+**两个办法：**
+
+1. **开权限**：设置 → 设备能力授权 → 打开文件访问
+2. **绕过去**：先复制到工作区再还原
+
+```bash
+cp "$F" ~/ && dsh-restore ~/$(basename "$F")
+```
+
+**`~/` 在工作区内，不受 `/sdcard` 那层限制。**
 
 ---
 

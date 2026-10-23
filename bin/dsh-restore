@@ -64,7 +64,20 @@ say "   大小: $BYTES 字节"
 [ "$BYTES" -ge 1024 ] || die "文件只有 $BYTES 字节，肯定没传完。重新传一次。"
 
 # ---- 能不能读 ----
-[ -r "$PKG" ] || die "文件读不了（权限问题）。试试: chmod 644 \"$PKG\""
+# ⚠️ /sdcard 是 FUSE 挂载，有 SELinux / uid 限制。
+#    proot 里的 root 并不等于真 root —— ls 列得出来、open() 照样被拒。
+#    所以「文件在」不等于「读得了」，必须单独查。
+if [ ! -r "$PKG" ] || ! head -c 1 "$PKG" >/dev/null 2>&1; then
+  say ""
+  say "⚠️  文件在，但读不了。"
+  die "没权限打开这个文件。
+
+   DSHA 需要文件访问权限：
+     设置 → 设备能力授权 → 打开文件访问
+
+   或者先复制到工作区再还原（绕开 /sdcard 的限制）：
+     cp \"$PKG\" ~/ && dsh-restore ~/$(basename \"$PKG\")"
+fi
 
 # ---- 魔数（可选查）----
 # ⚠️ od 不是每个环境都装。装了就用它提前认出 zip；没装就跳过，
@@ -84,6 +97,14 @@ if ! GZERR=$(gzip -t "$PKG" 2>&1); then
   printf '%s\n' "$GZERR" | sed 's/^/   /'
   say ""
   case "$GZERR" in
+    *"Permission denied"*)
+      die "没权限读这个文件。
+
+   DSHA 需要文件访问权限：
+     设置 → 设备能力授权 → 打开文件访问
+
+   或者先复制到工作区再还原：
+     cp \"$PKG\" ~/ && dsh-restore ~/$(basename \"$PKG\")" ;;
     *"not in gzip format"*)
       die "不是 gzip 格式。文件可能被改名或转成了别的压缩格式。
    看看它的真面目: file \"$PKG\"（如果装了 file）" ;;
@@ -126,6 +147,7 @@ if ! TARERR=$(tar -xzpf "$PKG" -C "$STAGE" 2>&1); then
   say ""
   case "$TARERR" in
     *"No space left"*)      die "空间不够。清一下 /tmp，或用 TMPDIR=/root/tmp 重试。" ;;
+    *"Permission denied"*)  die "没权限。先 cp 到 ~/ 再还原。" ;;
     *"Cannot open"*)        die "打不开这个文件。检查路径和权限。" ;;
     *"not in gzip format"*) die "文件格式不对。检查是不是被改成了别的压缩格式。" ;;
     *)                      die "解压失败。上面是原始报错，可以发给 AI 帮你看。" ;;

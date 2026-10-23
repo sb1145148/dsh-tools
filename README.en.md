@@ -232,6 +232,36 @@ find /sdcard/Download -maxdepth 2 -name "*.tar.gz" 2>/dev/null
 | File is in a subfolder | Path missing a level |
 | Transfer incomplete | Size doesn't match (a few MB) |
 | Filename has spaces or CJK | **Must be quoted** |
+| **File exists but unreadable** | `ls` lists it, restore says `Permission denied` |
+
+---
+
+#### ⚠️ Special case: `ls` shows it, but it can't be read
+
+**`/sdcard` is a FUSE mount with SELinux and uid restrictions.** root inside the environment is not real root:
+
+```
+ls -l  →  directory read permission  →  ✅ lists fine
+open() →  actual file open           →  ❌ denied
+```
+
+**How to tell:**
+
+```bash
+ls -l "$F"                  # prints a line
+head -c 1 "$F" >/dev/null   # Permission denied → this is it
+```
+
+**Two fixes:**
+
+1. **Grant access**: Settings → Device capabilities → File access
+2. **Work around it**: copy into the workspace first
+
+```bash
+cp "$F" ~/ && dsh-restore ~/$(basename "$F")
+```
+
+**`~/` is inside the workspace, so the `/sdcard` restriction doesn't apply.**
 
 ---
 
