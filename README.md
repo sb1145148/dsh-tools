@@ -194,6 +194,25 @@ ls ~/.dsh/sessions/
 把输出发出来，看目录名是不是 `--root-xxx--` 这种形式，
 要和当前工作区路径对应。
 
+### 还原之后，我之前修过的东西怎么回退了
+
+**dsh-restore 默认不覆盖比备份新的文件** —— 从 1.1.3 开始。
+
+如果你用的是旧版本，或者就是想强制覆盖：加 `--force`。
+
+**先看看会做什么：**
+
+```bash
+dsh-restore xxx.tar.gz --dry-run
+```
+
+**另外：** 每次还原都会把现有目录存成 `*.before-restore`，
+所以「被覆盖掉的东西」通常还能从这里捞回来：
+
+```bash
+ls ~/.dsh/*.before-restore/
+```
+
 ### 提示「逃逸软链」
 
 如果 `dsh-backup` 输出里 `软链:` 不是 0，说明还有指向包外的链接。
@@ -407,8 +426,14 @@ sh install.sh --prefix ~/bin
 # 备份
 dsh-backup
 
-# 还原（默认不动状态文件）
+# 还原（默认不动状态文件，且不覆盖比备份新的文件）
 dsh-restore /sdcard/Download/dsh-backup/xxx.tar.gz
+
+# 先看看会做什么，不实际写（安全）
+dsh-restore xxx.tar.gz --dry-run
+
+# 强制覆盖，不管修改时间
+dsh-restore xxx.tar.gz --force
 
 # 连状态文件一起还原（谨慎）
 dsh-restore xxx.tar.gz --all

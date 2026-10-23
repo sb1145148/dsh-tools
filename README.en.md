@@ -362,8 +362,14 @@ sh install.sh --prefix ~/bin
 # back up
 dsh-backup
 
-# restore (leaves state files alone by default)
+# restore (leaves state files alone; never overwrites newer files)
 dsh-restore /sdcard/Download/dsh-backup/xxx.tar.gz
+
+# preview only, writes nothing (safe)
+dsh-restore xxx.tar.gz --dry-run
+
+# force overwrite regardless of mtime
+dsh-restore xxx.tar.gz --force
 
 # restore state files too (careful)
 dsh-restore xxx.tar.gz --all

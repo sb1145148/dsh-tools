@@ -15,10 +15,22 @@
 # ============================================================
 set -u
 
-PKG="${1:-}"
-MODE="${2:-safe}"
+PKG=""
+MODE="safe"
+FORCE=0
+DRY=0
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
+
+for a in "$@"; do
+  case "$a" in
+    --all)     MODE="--all" ;;
+    --force)   FORCE=1 ;;
+    -n|--dry-run) DRY=1 ;;
+    -*)        ;;                 # 其它未知开关忽略
+    *)         [ -z "$PKG" ] && PKG="$a" ;;
+  esac
+done
 
 say() { printf '%s\n' "$*"; }
 die() { printf '❌ %s\n' "$*" >&2; exit 1; }
@@ -26,7 +38,7 @@ die() { printf '❌ %s\n' "$*" >&2; exit 1; }
 case "${PKG:-}" in
   -h|--help|"")
     cat <<'HLP'
-用法: dsh-restore <包路径> [--all]
+用法: dsh-restore <包路径> [--all] [--force] [--dry-run]
 
   从 dsh-backup 生成的包还原数据。
 
@@ -34,7 +46,13 @@ case "${PKG:-}" in
   meme-packs / plugin-kits / profiles），
   不覆盖状态文件，覆盖前自动备份成 *.before-restore。
 
-  --all   连状态文件和 .bashrc 一起还原（谨慎）
+  ⚠️ 默认不覆盖「比备份新」的文件。
+     备份是过去某一刻的快照，如果现场数据更新（比如用 dsh-repair
+     修过会话），直接覆盖会让它退回旧状态。所以逐文件比修改时间。
+
+  --all       连状态文件和 .bashrc 一起还原（谨慎）
+  --force     强制覆盖，不管修改时间
+  --dry-run   只看会做什么，不实际写
 
 示例:
   dsh-restore /sdcard/Download/dsh-backup/dsh-backup-20261022-1117.tar.gz
@@ -164,15 +182,84 @@ say "   内容: $(ls "$SRC" | tr '\n' ' ')"
 restore_dir() {
   name="$1"; src="$SRC/$1"; dst="$DSH/$1"
   [ -d "$src" ] || { say "   ⏭  $name（包内没有）"; return; }
-  if [ -e "$dst" ]; then
+
+  if [ -e "$dst" ] && [ "$DRY" = "0" ]; then
     backup="${dst}.before-restore"
     [ -e "$backup" ] && rm -rf "$backup"
     cp -a "$dst" "$backup" 2>/dev/null || true
     say "   💾 已备份现有 $name → $(basename "$backup")"
   fi
-  mkdir -p "$dst"
-  cp -a "$src/." "$dst/" 2>/dev/null || true
-  say "   ✅ $name"
+  [ "$DRY" = "1" ] || mkdir -p "$dst"
+
+  # ------------------------------------------------------------
+  #  ⚠️ 这里以前是 cp -a "$src/." "$dst/" —— 无条件覆盖。
+  #
+  #     问题：备份是「过去某个时刻」的快照。如果现场数据比备份新
+  #     （比如你用 dsh-repair 修过会话、或者备份后又聊了几句），
+  #     还原会把更新的数据抹掉，退回到旧状态。
+  #
+  #     实测踩过：dsh-repair 修好一个会话（7.7 MB），随后还原了一个
+  #     修复前的备份，会话被 13.5 MB 的旧版覆盖，打不开了。
+  #
+  #     现在改成逐文件比 mtime：现场比包里新的就跳过。
+  #     要强制覆盖用 --force。
+  # ------------------------------------------------------------
+  LOG="$STAGE/restore-$name.log"
+  : > "$LOG"
+
+  find "$src" -type f 2>/dev/null | while IFS= read -r f; do
+    rel="${f#$src/}"
+    d="$dst/$rel"
+
+    if [ -e "$d" ] && [ "$FORCE" = "0" ]; then
+      st=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+      dt=$(stat -c %Y "$d" 2>/dev/null || echo 0)
+      if [ "$dt" -gt "$st" ]; then
+        printf 'SKIP\t%s\n' "$rel" >> "$LOG"
+        continue
+      fi
+    fi
+
+    if [ "$DRY" = "1" ]; then
+      printf 'COPY\t%s\n' "$rel" >> "$LOG"
+      continue
+    fi
+
+    mkdir -p "$(dirname "$d")" 2>/dev/null
+    if cp -a "$f" "$d" 2>/dev/null; then
+      printf 'COPY\t%s\n' "$rel" >> "$LOG"
+    else
+      printf 'FAIL\t%s\n' "$rel" >> "$LOG"
+    fi
+  done
+
+  # 符号链接单独处理（不跟时间比，缺了才补）
+  find "$src" -type l 2>/dev/null | while IFS= read -r f; do
+    rel="${f#$src/}"
+    d="$dst/$rel"
+    [ -e "$d" ] && continue
+    [ "$DRY" = "1" ] && continue
+    mkdir -p "$(dirname "$d")" 2>/dev/null
+    cp -a "$f" "$d" 2>/dev/null || true
+  done
+
+  c=$(grep -c '^COPY' "$LOG" 2>/dev/null || true)
+  k=$(grep -c '^SKIP' "$LOG" 2>/dev/null || true)
+  x=$(grep -c '^FAIL' "$LOG" 2>/dev/null || true)
+  c=${c:-0}; k=${k:-0}; x=${x:-0}
+
+  if [ "$DRY" = "1" ]; then
+    say "   🔎 $name（会写入 $c，会跳过 $k）"
+  elif [ "$k" -gt 0 ]; then
+    say "   ✅ $name（写入 $c，跳过 $k 个比备份新的）"
+    grep '^SKIP' "$LOG" 2>/dev/null | head -5 | while IFS="$(printf '\t')" read -r _ rel; do
+      say "      跳过: $rel"
+    done
+    [ "$k" -gt 5 ] && say "      …还有 $((k-5)) 个（--force 可强制覆盖）"
+  else
+    say "   ✅ $name（写入 $c）"
+  fi
+  [ "$x" -gt 0 ] && say "   ⚠️  $name 有 $x 个文件复制失败"
 }
 
 say ""
