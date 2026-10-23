@@ -36,11 +36,13 @@ die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
 
 DRY=0
 MODE="strip"
+MARK=0          # 1 = 只打 ignorable 标记，不删不重排
 ARGS=""
 for a in "$@"; do
   case "$a" in
     --list)    MODE="list" ;;
     --dry-run) DRY=1 ;;
+    --mark)    MARK=1 ;;
     -*)        die "不认识的选项: $a" ;;
     *)         ARGS="$ARGS
 $a" ;;
@@ -88,11 +90,15 @@ fi
 
 [ -n "$TYPES" ] || die "要指定事件类型。先用 --list 看看有哪些"
 
-say "🔪 剥离: $TYPES"
+if [ "$MARK" = "1" ]; then
+  say "🏷  打 ignorable 标记（不删、不重排）: $TYPES"
+else
+  say "🔪 剥离: $TYPES"
+fi
 DPY=$(printf '%s' "$TYPES" | tr ' ' ',')
-python3 - "$T/in.jsonl" "$T/out.jsonl" "$DPY" "$DRY" <<'PY'
+python3 - "$T/in.jsonl" "$T/out.jsonl" "$DPY" "$DRY" "$MARK" <<'PY'
 import json, sys
-src, dst, drop, dry = sys.argv[1], sys.argv[2], set(sys.argv[3].split(',')), sys.argv[4] == '1'
+src, dst, drop, dry, mark = sys.argv[1], sys.argv[2], set(sys.argv[3].split(',')), sys.argv[4] == '1', sys.argv[5] == '1'
 kept, dropped, seq, seen = [], 0, 0, {t: 0 for t in drop}
 for line in open(src, encoding='utf-8'):
     line = line.rstrip('\n')
@@ -104,14 +110,25 @@ for line in open(src, encoding='utf-8'):
         kept.append(line); continue
     t = d.get('type') or ''
     if t in drop:
-        dropped += 1; seen[t] += 1
+        seen[t] += 1
+        if mark:
+            # 官方支持的放行标记：harness 看到 ignorable===true 就跳过这个事件，
+            # 不删、不重排 —— seq 连续性完全不动，最安全
+            d['ignorable'] = True
+            kept.append(json.dumps(d, ensure_ascii=False, separators=(',', ':')))
+            continue
+        dropped += 1
         continue
-    if 'seq' in d:
+    if not mark and 'seq' in d:
         seq += 1
         d['seq'] = seq
     kept.append(json.dumps(d, ensure_ascii=False, separators=(',', ':')))
 open(dst, 'w', encoding='utf-8').write('\n'.join(kept) + '\n')
-print(f"  保留 {len(kept)} 行，剥离 {dropped} 行，重排 seq 1..{seq}")
+if mark:
+    total = sum(seen.values())
+    print(f"  保留 {len(kept)} 行，其中打了标记 {total} 条（没删任何行，seq 没动）")
+else:
+    print(f"  保留 {len(kept)} 行，剥离 {dropped} 行，重排 seq 1..{seq}")
 for t, k in seen.items():
     print(f"    {t}: {k} 条")
 PY
@@ -130,7 +147,11 @@ zstd -q -f -19 -o "$OUT" "$T/out.jsonl" 2>/dev/null || die "压缩失败"
 # 用实际剥离的类型做残留检查，不要写死
 PAT=$(printf '%s' "$TYPES" | tr ' ' '\n' | sed 's/[][()*+?.^$|\\]/\\&/g' | grep . | paste -sd'|' -)
 if [ -n "$PAT" ]; then
+  if [ "$MARK" = "1" ]; then
+  LEFT=0   # 打标记模式本来就不删，残留是正常的
+else
   LEFT=$(zstd -dc "$OUT" 2>/dev/null | grep -c -E "\"type\":\"($PAT)\"" 2>/dev/null || true)
+fi
 else
   LEFT=0
 fi

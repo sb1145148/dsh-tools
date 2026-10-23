@@ -30,11 +30,13 @@ SESS="$DSH/sessions"
 
 MODE="check"
 STRIP_TYPE=""
+STRIP_MODE="mark"
 SKIP_NEXT=0
 for a in "$@"; do
   if [ "$SKIP_NEXT" = "1" ]; then STRIP_TYPE="$STRIP_TYPE $a"; SKIP_NEXT=0; continue; fi
   case "$a" in
     --fix)         MODE="fix" ;;
+    --remove)      STRIP_MODE="remove" ;;
     --strip-type)  SKIP_NEXT=1 ;;
     --strip-type=*) STRIP_TYPE="$STRIP_TYPE ${a#*=}" ;;
     --strip-type*)
@@ -382,7 +384,14 @@ if [ -n "$STRIP_TYPE" ]; then
     :
     if have dsh-strip; then
       say "     $(basename "$(dirname "$f")")"
-      dsh-strip "$f" $STRIP_TYPE 2>&1 | grep -E "保留|残留" | sed 's/^/       /'
+      # 默认用 --mark（打 ignorable 标记）：不删行、不重排 seq，
+      # 这是 harness 官方支持的放行方式，最安全。
+      # 要真的删掉才加 --remove。
+      if [ "$STRIP_MODE" = "remove" ]; then
+        dsh-strip "$f" $STRIP_TYPE 2>&1 | grep -E "保留|残留" | sed 's/^/       /'
+      else
+        dsh-strip --mark "$f" $STRIP_TYPE 2>&1 | grep -E "打 ignorable|保留|条" | sed 's/^/       /'
+      fi
       [ -f "$f.stripped" ] && mv "$f.stripped" "$f"
     else
       say "     ⚠️  没装 dsh-strip，跳过"

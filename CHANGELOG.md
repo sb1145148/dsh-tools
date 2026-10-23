@@ -1,5 +1,87 @@
 # 更新日志
 
+## 1.6.0 — 2026-10-24
+
+**重大修正：`dsh-strip` 之前用的方法会破坏日志。**
+
+### 我做错了什么
+
+1.5.x 的 `dsh-strip` 是：**删掉事件 → 重排 seq → 写回**。
+
+结果有用户剥完 `job/registered` 之后，**整个会话从列表里消失了**。
+
+查下来：
+
+```
+原始   15894 行  seq 0..15893  连续
+剥离后 15754 行  seq 1..15754  连续
+应用打开后继续写，它的计数器还停在 15894
+→ 追加的事件从 15894 开始，中间空 140 个号
+→ seq 不连续 → 应用判定 corrupt → 会话不显示
+```
+
+**我的重编号和应用内部的计数器不同步。**
+
+### 真正的解法：harness 自带放行机制
+
+翻 harness 源码，校验逻辑是这样的：
+
+```js
+if (!KNOWN_SESSION_EVENT_TYPES.has(event.type) && event.ignorable !== true)
+  throw unsupported(`contains event type "${event.type}" unknown to this harness`)
+```
+
+**`ignorable: true` 就是官方留的标记 —— 打上它，harness 就跳过这个事件。**
+
+**根本不需要删任何行。**
+
+### 改成 `--mark`
+
+```bash
+dsh-strip --mark <文件> job/registered    # 打标记（安全，现在的默认）
+dsh-strip <文件> job/registered           # 删+重排（旧行为，别再用）
+```
+
+**实测对比：**
+
+| | 删+重排（1.5.x） | 打标记（1.6.0） |
+| --- | --- | --- |
+| 删行 | 删 140 行 | **一条没删** |
+| seq | 重排 1..15754 | **完全不动** |
+| 内容 | 少了 | 全在 |
+| 应用是否接受 | ❌ 会 corrupt | ✅ 官方支持 |
+
+```console
+$ dsh-strip --mark orig.zstd job/registered job/settled
+🏷  打 ignorable 标记（不删、不重排）: job/registered job/settled
+   保留 15895 行，其中打了标记 279 条（没删任何行，seq 没动）
+
+验证: 原始 seq 0..15893 / 处理后 seq 0..15893  完全一致 ✅
+```
+
+### `dsh-doctor` 默认改用标记
+
+```bash
+dsh-doctor --fix --strip-type job/registered --i-know    # 默认打标记
+dsh-doctor --fix --strip-type job/registered --remove    # 才真删
+```
+
+### 已经剥坏的怎么救
+
+如果用过 1.5.x 的 `dsh-strip`，原文件还在 `*.before-doctor`：
+
+```bash
+# 停 Web，然后用原件恢复 + 只打标记
+cp -a "$S/session.v4.jsonl.zstd.before-doctor" "$S/session.v4.jsonl.zstd"
+dsh-strip --mark "$S/session.v4.jsonl.zstd" job/registered job/settled
+mv "$S/session.v4.jsonl.zstd.stripped" "$S/session.v4.jsonl.zstd"
+```
+
+### 教训
+
+**我在没读 harness 源码的情况下自己发明了修复方案。**
+应用不接受某个东西时，应该先找它自己的放行机制，而不是绕过校验。
+
 ## 1.5.1 — 2026-10-24
 
 **修 `--strip-type` 的三个使用问题。**
