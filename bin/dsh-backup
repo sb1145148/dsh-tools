@@ -95,6 +95,65 @@ find "$ROOT" -type l -name "node_modules" -exec rm -f {} \; 2>/dev/null || true
 find "$ROOT" \( -name "__pycache__" -o -name "node_modules" -o -name "*.map" -o -name ".sessions-trash" \) -type d -exec rm -rf {} + 2>/dev/null || true
 rm -f "$ROOT"/config/*.log 2>/dev/null
 
+# ---------- 3.5 检查会话连续性 ----------
+# 会话日志是 seq 递增的 append-only 记录。应用偶尔会在「恢复会话」时
+# 让计数器跳一下，留下 seq 断档 —— 之后打开这个会话就会报
+# "stored session is corrupt: ... has seq gap"。
+#
+# 备份时顺手查一遍，比等用户打开会话才炸要好。
+# 没有 zstd 就跳过（不装 zstd 也能正常备份，只是查不了）。
+say "🩺 检查会话连续性..."
+if command -v zstd >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  GAPLOG="$STAGE/gaps.log"
+  : > "$GAPLOG"
+  SESSCOUNT=0
+  for f in "$ROOT"/sessions/*/*/session.v4.jsonl.zstd; do
+    [ -f "$f" ] || continue
+    SESSCOUNT=$((SESSCOUNT + 1))
+    zstd -dc "$f" 2>/dev/null | python3 -c "
+import sys, json
+rows = 0; prev = None; gaps = []
+for raw in sys.stdin.buffer:
+    if not raw.strip(): continue
+    try: o = json.loads(raw)
+    except Exception: continue
+    rows += 1
+    s = o.get('seq')
+    if s is None: continue
+    if prev is not None and s != prev + 1:
+        gaps.append((prev, s))
+    prev = s
+if gaps:
+    print(f'{rows}\t{len(gaps)}\t{gaps[0][0]}\t{gaps[0][1]}')
+" > "$STAGE/one.gap" 2>/dev/null || true
+    if [ -s "$STAGE/one.gap" ]; then
+      printf '%s\t%s\n' "$(basename "$(dirname "$f")")" "$(cat "$STAGE/one.gap")" >> "$GAPLOG"
+    fi
+  done
+  rm -f "$STAGE/one.gap"
+
+  if [ -s "$GAPLOG" ]; then
+    say "   ⚠️  有会话日志断档（打开时会报 corrupt）:"
+    while IFS="$(printf '\t')" read -r name rows ngap from to; do
+      say "      $name"
+      say "        ${rows} 行，${ngap} 处断档，首个: seq ${from} → ${to}（断了 $((to - from - 1)) 个）"
+    done < "$GAPLOG"
+    say ""
+    say "   修法（重启 Web 之后执行）:"
+    say "      dsh-repair"
+    say "   或者先只看不改:"
+    say "      dsh-repair --check"
+    GAPS="$(wc -l < "$GAPLOG")"
+  else
+    say "   ✅ ${SESSCOUNT} 个会话，seq 全部连续"
+    GAPS=0
+  fi
+else
+  say "   ⏭  跳过（没装 zstd 或 python3）"
+  say "      想检查就装: apt-get install -y zstd"
+  GAPS="?"
+fi
+
 # ---------- 4. 写说明 ----------
 cat > "$ROOT/README.md" <<EOF
 # DSH 备份
@@ -138,9 +197,22 @@ n=$(tar -tzf "$OUT" 2>/dev/null | wc -l)
 say ""
 say "✅ 完成"
 say "   文件: $OUT"
-say "   大小: $(du -h "$OUT" | cut -f1)"
+# /sdcard 是 FUSE 挂载，刚写完 stat 可能读到 0 —— 重试几次等它可见
+SIZE=0
+for _i in 1 2 3 4 5; do
+  SIZE=$(stat -c%s "$OUT" 2>/dev/null || echo 0)
+  [ "${SIZE:-0}" -gt 0 ] && break
+  sleep 1
+done
+if [ "${SIZE:-0}" -gt 0 ]; then
+  say "   大小: $(awk "BEGIN{printf \"%.1f MB\", $SIZE/1048576}")（$SIZE 字节）"
+else
+  say "   大小: 读不到（文件应该还在，用 ls -l 看一下）"
+fi
 say "   条目: $n"
 say "   软链: $sym（逃逸型 $bad）"
+[ "${GAPS:-?}" = "0" ] && say "   会话: 全部连续 ✅"
+[ "${GAPS:-?}" != "0" ] && [ "${GAPS:-?}" != "?" ] && say "   会话: ${GAPS} 个有断档 ⚠️（用 dsh-repair 修）"
 [ "$bad" -gt 0 ] && say "   ⚠️  仍有逃逸软链，还原时可能被拒"
 say ""
 say "下一步：把这个文件传到新设备，然后跑"
