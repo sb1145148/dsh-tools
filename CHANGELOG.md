@@ -1,5 +1,80 @@
 # 更新日志
 
+## 1.4.1 — 2026-10-23
+
+**修安装后的用法提示。**
+
+### 问题
+
+装完只显示三个命令：
+
+```console
+用法：
+   dsh-backup                  备份
+   dsh-restore <包路径>         还原
+   dsh-restore --help          看还原帮助
+   dsh-repair --check          检查会话日志有没有断档
+```
+
+**`dsh-strip` 和 `dsh-doctor` 一个字没提** —— 用户根本不知道有这两个命令。
+
+而且那段字符串本身还是坏的（`看还原帮助` 后面跨了行）。
+
+### 改法
+
+**① 列出全部，而且按实际装了哪些动态显示**
+
+缺哪个就不显示哪个，不会指向不存在的命令。
+
+**② 加了「出了事的顺序」**
+
+不只列命令，还告诉用户什么时候用哪个：
+
+```console
+出了事的顺序：
+   1. dsh-doctor          先看有没有问题
+   2. dsh-doctor --fix    有就自动修
+   3. dsh-doctor --rollback  修坏了回退
+```
+
+**③ 修了一个健壮性问题**
+
+`install.sh` 有 `set -eu`，包里缺某个工具时 `cp` 失败会**让整个安装中止**。
+现在改成跳过并提示：
+
+```console
+⏭  dsh-strip（包里没有，跳过）
+```
+
+### 现在的输出
+
+```console
+用法：
+   dsh-backup                  备份到 /sdcard/Download/dsh-backup/
+   dsh-doctor                  体检全部（安全，先跑这个）
+   dsh-doctor --fix            有问题的自动修
+   dsh-doctor --rollback       修坏了就回退
+   dsh-restore <包路径>         还原
+   dsh-repair --check          查会话日志有没有断档
+   dsh-strip --list <文件>     看会话里有哪些事件类型
+   dsh-strip <文件> <类型...>   剥掉不认识的事件类型
+
+出了事的顺序：
+   1. dsh-doctor          先看有没有问题
+   2. dsh-doctor --fix    有就自动修
+   3. dsh-doctor --rollback  修坏了回退
+
+已装：dsh-backup dsh-restore dsh-repair dsh-strip dsh-doctor
+```
+
+### 测了三种情况
+
+| 场景 | 结果 |
+| --- | --- |
+| 全部装上 | ✅ 8 条用法全列出 |
+| 只有 backup + doctor | ✅ 只显示这两组 |
+| 只有 backup | ✅ 不显示空标题 |
+
 ## 1.4.0 — 2026-10-23
 
 **一条命令体检 + 自动修。**
