@@ -19,15 +19,124 @@ OUT="$OUT_DIR/dsh-backup-$STAMP.tar.gz"
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/dsh-backup.XXXXXX")
 ROOT="$STAGE/dsh-backup-$STAMP"
 
+TOOLS_VERSION="1.2.0"
+
 say() { printf '%s\n' "$*"; }
 die() { printf '❌ %s\n' "$*" >&2; exit 1; }
+warn() { printf '⚠️  %s\n' "$*" >&2; }
+
+# ============================================================
+#  会话文件格式
+#
+#  ⚠️ 这是整个工具最脆的地方。
+#
+#     DSHA 的会话文件叫 session.v4.jsonl.zstd —— 那个 v4 是格式版本。
+#     如果哪天变成 v5，而我们还照旧打包，**不会报错**，备份看起来也
+#     正常，但恢复之后应用读不了。
+#
+#     静默失效比报错难查得多，所以这里主动检测：
+#     不认识的格式直接停下，要越过得显式加 --force。
+# ============================================================
+KNOWN_SESSION_FORMATS="v4"
+
+detect_session_format() {
+  # 从 <dir> 下的 session.vN.jsonl.zstd 里抠版本号，去重排序
+  find "$1" -type f -name 'session.v*.jsonl.zstd' 2>/dev/null \
+    | sed -n 's|.*/session\.\(v[0-9][0-9]*\)\.jsonl\.zstd$|\1|p' \
+    | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+format_is_known() {
+  for f in $1; do
+    case " $KNOWN_SESSION_FORMATS " in
+      *" $f "*) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# ---------- --check：只体检，不打包 ----------
+if [ "${1:-}" = "--check" ]; then
+  say "🩺 dsh-tools $TOOLS_VERSION 自检"
+  say ""
+  say "  DSHA 目录:     $DSH"
+  [ -d "$DSH" ] || { say "                 ❌ 不存在"; exit 1; }
+
+  # 应用版本（能读到就读）
+  APPV=$(curl -s -H @/root/.dsh/.bridge_headers "http://127.0.0.1:3090/app/version" 2>/dev/null \
+         | sed -n 's/.*APP_VERSION=\([^\\]*\).*/\1/p' | head -1)
+  say "  应用版本:      ${APPV:-（读不到）}"
+
+  FMT=$(detect_session_format "$DSH/sessions")
+  N=$(find "$DSH/sessions" -type f -name 'session.v*.jsonl.zstd' 2>/dev/null | wc -l)
+  if [ -z "$FMT" ]; then
+    say "  会话格式:      未检测到（可能是新装的空环境）"
+  elif format_is_known "$FMT"; then
+    say "  会话格式:      $FMT  ✅ 已知"
+  else
+    say "  会话格式:      $FMT  ❌ 不认识（支持: $KNOWN_SESSION_FORMATS）"
+  fi
+  say "  会话文件数:    $N"
+
+  say ""
+  say "  依赖:"
+  MISS=0
+  for c in tar stat find cp sed grep head mktemp; do
+    if command -v "$c" >/dev/null 2>&1; then printf '                 %-8s ✅\n' "$c"
+    else printf '                 %-8s ❌\n' "$c"; MISS=$((MISS+1)); fi
+  done
+  for c in zstd od md5sum; do
+    if command -v "$c" >/dev/null 2>&1; then printf '                 %-8s ✅（可选）\n' "$c"
+    else printf '                 %-8s —（可选，缺了不影响备份）\n' "$c"; fi
+  done
+
+  say ""
+  LAST=$(ls -t "$OUT_DIR"/dsh-backup-*.tar.gz 2>/dev/null | head -1)
+  if [ -n "$LAST" ]; then
+    say "  上次备份:      $(stat -c %y "$LAST" 2>/dev/null | cut -c1-19)"
+    say "                 $(basename "$LAST")  $(du -h "$LAST" | cut -f1)"
+  else
+    say "  上次备份:      没有"
+  fi
+
+  say ""
+  if [ -z "$FMT" ] || format_is_known "$FMT"; then
+    [ "$MISS" = "0" ] && say "  ✅ 可以正常备份" || say "  ⚠️  缺 $MISS 个必需命令"
+    exit 0
+  else
+    say "  ❌ 不认识的会话格式，建议先别备份，等工具适配"
+    exit 2
+  fi
+fi
 
 cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT INT TERM
 
 [ -d "$DSH" ] || die "找不到 $DSH"
 
-say "📦 准备打包..."
+# ============================================================
+#  打包前先确认会话格式认识
+# ============================================================
+SESS_FMT=$(detect_session_format "$DSH/sessions")
+if [ -z "$SESS_FMT" ]; then
+  say "📦 准备打包..."
+  say "   会话格式: 未检测到（可能是空环境）"
+elif format_is_known "$SESS_FMT"; then
+  say "📦 准备打包..."
+  say "   会话格式: $SESS_FMT ✅"
+else
+  warn "会话格式是 $SESS_FMT，但本工具只认识: $KNOWN_SESSION_FORMATS"
+  warn ""
+  warn "  DSHA 可能改了会话格式。照旧打包出来的备份，恢复后应用可能读不了。"
+  warn "  建议先跑 dsh-backup --check 看看，或者等工具适配。"
+  warn ""
+  if [ "${FORCE_FMT:-0}" = "1" ] || [ "${2:-}" = "--force" ] || [ "${1:-}" = "--force" ]; then
+    warn "  已指定 --force，继续打包（风险自负）"
+  else
+    die "已中止。确实要打包就加 --force"
+  fi
+fi
 say "   源: $DSH"
 mkdir -p "$ROOT" "$OUT_DIR"
 
@@ -155,6 +264,25 @@ else
 fi
 
 # ---------- 4. 写说明 ----------
+# ============================================================
+#  记录环境信息 —— 以后版本变了，一对比就能发现问题
+# ============================================================
+APPV=$(curl -s -H @/root/.dsh/.bridge_headers "http://127.0.0.1:3090/app/version" 2>/dev/null \
+       | sed -n 's/.*APP_VERSION=\([^\\]*\).*/\1/p' | head -1)
+cat > "$ROOT/ENVIRONMENT.json" <<JSON
+{
+  "dsh_tools": "$TOOLS_VERSION",
+  "created": "$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')",
+  "host": "$(hostname 2>/dev/null || echo unknown)",
+  "dsha_version": "${APPV:-unknown}",
+  "session_format": "${SESS_FMT:-unknown}",
+  "known_formats": "$KNOWN_SESSION_FORMATS",
+  "session_files": $(find "$DSH/sessions" -type f -name 'session.v*.jsonl.zstd' 2>/dev/null | wc -l),
+  "backup_format": 2
+}
+JSON
+say "   📋 环境信息已记录（会话格式 ${SESS_FMT:-?}）"
+
 cat > "$ROOT/README.md" <<EOF
 # DSH 备份
 

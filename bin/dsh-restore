@@ -34,6 +34,7 @@ done
 
 say() { printf '%s\n' "$*"; }
 die() { printf '❌ %s\n' "$*" >&2; exit 1; }
+warn() { printf '⚠️  %s\n' "$*" >&2; }
 
 case "${PKG:-}" in
   -h|--help|"")
@@ -173,6 +174,53 @@ if ! TARERR=$(tar -xzpf "$PKG" -C "$STAGE" 2>&1); then
 fi
 
 SRC=$(find "$STAGE" -maxdepth 1 -mindepth 1 -type d | head -1)
+
+# ============================================================
+#  会话格式对比
+#
+#  ⚠️ DSHA 的会话文件是 session.vN.jsonl.zstd，N 是格式版本。
+#     如果包里是 v4、现场已经变成 v5，照旧覆盖写进去，应用会读不了。
+#     静默失效比报错难查，所以这里主动比一次。
+# ============================================================
+KNOWN_SESSION_FORMATS="v4"
+
+detect_fmt() {
+  find "$1" -type f -name 'session.v*.jsonl.zstd' 2>/dev/null \
+    | sed -n 's|.*/session\.\(v[0-9][0-9]*\)\.jsonl\.zstd$|\1|p' \
+    | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+fmt_known() {
+  for f in $1; do
+    case " $KNOWN_SESSION_FORMATS " in
+      *" $f "*) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+PKG_FMT=$(detect_fmt "$SRC/sessions")
+LIVE_FMT=$(detect_fmt "$DSH/sessions")
+
+if [ -n "$PKG_FMT" ]; then
+  say "   包内会话格式: ${PKG_FMT}"
+  if ! fmt_known "$PKG_FMT"; then
+    warn "包里的会话格式 $PKG_FMT 本工具不认识（支持: $KNOWN_SESSION_FORMATS）"
+    warn "  照旧还原可能让应用读不了这些会话。"
+    [ "$FORCE" = "1" ] || die "已中止。确实要还原就加 --force"
+    warn "  已指定 --force，继续"
+  fi
+fi
+
+if [ -n "$PKG_FMT" ] && [ -n "$LIVE_FMT" ] && [ "$PKG_FMT" != "$LIVE_FMT" ]; then
+  warn "格式不一致：包内 $PKG_FMT，现场 $LIVE_FMT"
+  warn "  直接覆盖会让现场变成 $PKG_FMT，应用可能读不了。"
+  warn "  建议：先分目录还原（--into <目录>），确认能读再覆盖。"
+  [ "$FORCE" = "1" ] || die "已中止。确实要还原就加 --force"
+  warn "  已指定 --force，继续"
+fi
+
 [ -n "$SRC" ] || die "解开了但里面没有目录，包可能是空的"
 say "   内容: $(ls "$SRC" | tr '\n' ' ')"
 
