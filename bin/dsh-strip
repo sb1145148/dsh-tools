@@ -1,0 +1,147 @@
+#!/bin/sh
+# ============================================================
+#  dsh-strip —— 剥掉日志里「本版本不认识」的事件类型
+#
+#  症状（应用里看到的）：
+#    failed to observe session "session-xxx":
+#    contains event type "job/registered" (seq N)
+#    unknown to this harness and not marked ignorable;
+#    refusing to interpret the log
+#    — it was likely written by a newer harness
+#
+#  原因：**日志是往前兼容、不往后兼容的。**
+#    0.2.1 写的日志，0.2.0 读不懂 —— 而且不认识的事件没被标记成
+#    可忽略时，整份日志会被拒绝解释，不是跳过那一条。
+#
+#  解法（两个）：
+#    A. 升回写这份日志的版本 —— 正统做法，推荐
+#    B. 用这个工具剥掉不认识的事件，重排 seq —— 留在旧版本时用
+#
+#  做法：删掉指定类型的事件，把剩下的 seq 重排成连续的。
+#  其它内容一行不动。
+#
+#  用法:
+#    dsh-strip <session.v4.jsonl.zstd> <类型> [类型...]
+#    dsh-strip --list <session.v4.jsonl.zstd>     # 只看有哪些类型
+#    dsh-strip --dry-run <文件> <类型...>          # 只看会删多少
+#
+#  例:
+#    dsh-strip session.v4.jsonl.zstd job/registered job/settled
+# ============================================================
+set -u
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf '⚠️  %s\n' "$*" >&2; }
+die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
+
+DRY=0
+MODE="strip"
+ARGS=""
+for a in "$@"; do
+  case "$a" in
+    --list)    MODE="list" ;;
+    --dry-run) DRY=1 ;;
+    -*)        die "不认识的选项: $a" ;;
+    *)         ARGS="$ARGS
+$a" ;;
+  esac
+done
+
+# 第一个非选项参数是文件，剩下的是类型
+FILE=$(printf '%s' "$ARGS" | sed -n '2p')
+TYPES=$(printf '%s' "$ARGS" | sed '1,2d' | tr '\n' ' ' | sed 's/ *$//')
+
+[ -n "$FILE" ] || die "用法: dsh-strip <session.v4.jsonl.zstd> <类型> [类型...]"
+[ -f "$FILE" ] || die "找不到文件: $FILE"
+command -v zstd >/dev/null 2>&1 || die "需要 zstd"
+command -v python3 >/dev/null 2>&1 || die "需要 python3"
+
+T=$(mktemp -d "${TMPDIR:-/tmp}/dsh-strip.XXXXXX")
+trap 'rm -rf "$T"' EXIT INT TERM
+
+say "📂 解压..."
+zstd -dc "$FILE" > "$T/in.jsonl" 2>/dev/null || die "解压失败"
+
+# ---------- --list ----------
+if [ "$MODE" = "list" ]; then
+  say ""
+  say "📊 事件类型分布:"
+  python3 - "$T/in.jsonl" <<'PY'
+import json, sys, collections
+c = collections.Counter(); n = 0; bad = 0; mx = 0
+for line in open(sys.argv[1], encoding='utf-8'):
+    line = line.strip()
+    if not line: continue
+    n += 1
+    try: d = json.loads(line)
+    except Exception: bad += 1; continue
+    c[d.get('type') or '?'] += 1
+    s = d.get('seq')
+    if isinstance(s, int) and s > mx: mx = s
+print(f"  总行数 {n}  解析失败 {bad}  最大 seq {mx}")
+print()
+for t, k in c.most_common():
+    print(f"    {t:<42} {k:>6}")
+PY
+  exit 0
+fi
+
+[ -n "$TYPES" ] || die "要指定事件类型。先用 --list 看看有哪些"
+
+say "🔪 剥离: $TYPES"
+DPY=$(printf '%s' "$TYPES" | tr ' ' ',')
+python3 - "$T/in.jsonl" "$T/out.jsonl" "$DPY" "$DRY" <<'PY'
+import json, sys
+src, dst, drop, dry = sys.argv[1], sys.argv[2], set(sys.argv[3].split(',')), sys.argv[4] == '1'
+kept, dropped, seq, seen = [], 0, 0, {t: 0 for t in drop}
+for line in open(src, encoding='utf-8'):
+    line = line.rstrip('\n')
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        kept.append(line); continue
+    t = d.get('type') or ''
+    if t in drop:
+        dropped += 1; seen[t] += 1
+        continue
+    if 'seq' in d:
+        seq += 1
+        d['seq'] = seq
+    kept.append(json.dumps(d, ensure_ascii=False, separators=(',', ':')))
+open(dst, 'w', encoding='utf-8').write('\n'.join(kept) + '\n')
+print(f"  保留 {len(kept)} 行，剥离 {dropped} 行，重排 seq 1..{seq}")
+for t, k in seen.items():
+    print(f"    {t}: {k} 条")
+PY
+
+if [ "$DRY" = "1" ]; then
+  say ""
+  say "（--dry-run，没有写任何文件）"
+  exit 0
+fi
+
+OUT="$FILE.stripped"
+say "🗜  压缩..."
+zstd -q -f -19 -o "$OUT" "$T/out.jsonl" 2>/dev/null || die "压缩失败"
+
+# ---------- 自检 ----------
+LEFT=$(zstd -dc "$OUT" 2>/dev/null | grep -c -E '"type":"(job/registered|job/settled)"' 2>/dev/null || true)
+LEFT=${LEFT:-0}
+N=$(zstd -dc "$OUT" 2>/dev/null | wc -l)
+
+say ""
+say "✅ 完成"
+say "   输出: $OUT"
+say "   大小: $(stat -c%s "$OUT") 字节（原 $(stat -c%s "$FILE")）"
+say "   行数: $N"
+say "   残留指定类型: $LEFT"
+[ "$LEFT" -gt 0 ] && warn "还有残留，检查一下类型名是不是打错了"
+
+say ""
+say "下一步："
+say "   1. 先停 Web（会话文件是活的，边读边写）"
+say "   2. cp -a \"$FILE\" \"$FILE.before-strip\""
+say "   3. mv \"$OUT\" \"$FILE\""
+say "   4. 启动 Web，打开那个会话确认"

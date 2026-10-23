@@ -39,6 +39,16 @@ warn() { printf '⚠️  %s\n' "$*" >&2; }
 # ============================================================
 KNOWN_SESSION_FORMATS="v4"
 
+KNOWN_EVENTS="session step/start step/end turn/start turn/end assistant/message
+assistant/attempt tool/call tool/result user/message system/message developer/message
+session/title session/title-llm-request session/end-seed model/selection request/header
+request/context llm/retry llm/retry-started compaction/start compaction/end
+compaction/summary compaction/prune agent/inbox/spliced agent-preset/selected
+job/registered job/settled todo/write goal/change permission/preset sandbox/mode
+approval/policy workspace/changes deliverables/presented web/deepseek-search-llm-request
+session-log-deepseek/delivery-accepted"
+
+
 detect_session_format() {
   # 从 <dir> 下的 session.vN.jsonl.zstd 里抠版本号，去重排序
   find "$1" -type f -name 'session.v*.jsonl.zstd' 2>/dev/null \
@@ -90,6 +100,48 @@ if [ "${1:-}" = "--check" ]; then
     if command -v "$c" >/dev/null 2>&1; then printf '                 %-8s ✅（可选）\n' "$c"
     else printf '                 %-8s —（可选，缺了不影响备份）\n' "$c"; fi
   done
+
+  # ---------- 事件类型检查 ----------
+  # ⚠️ 文件名里的 v4 只能说明「大版本对得上」。
+  #    真正的破坏往往发生在日志内部：新版本加了一个事件类型，
+  #    旧版本不认识就**整份拒读**（不是跳过那一条）。
+  #    所以这里把最近改动的那个会话解开，看有没有不认识的事件。
+  say ""
+  say "  事件类型:"
+  LATEST_SESS=$(find "$DSH/sessions" -type f -name 'session.v*.jsonl.zstd' 2>/dev/null \
+                -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+  if [ -z "$LATEST_SESS" ]; then
+    say "                 没有会话文件可查"
+  elif ! command -v zstd >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    say "                 跳过（需要 zstd 和 python3）"
+  else
+    UNK=$(KNOWN_EVENTS="$KNOWN_EVENTS" zstd -dc "$LATEST_SESS" 2>/dev/null | \
+      KNOWN_EVENTS="$KNOWN_EVENTS" python3 -c '
+import json, os, sys, collections
+known = set(os.environ["KNOWN_EVENTS"].split())
+seen = collections.Counter()
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try: d = json.loads(line)
+    except Exception: continue
+    seen[d.get("type") or "?"] += 1
+unk = {t: c for t, c in seen.items() if t not in known}
+print(f"{len(seen)} 种 / {sum(seen.values())} 条")
+for t, c in sorted(unk.items(), key=lambda x: -x[1]):
+    print(f"UNKNOWN\t{t}\t{c}")
+' 2>/dev/null)
+    SUM=$(printf '%s\n' "$UNK" | head -1)
+    say "                 $SUM"
+    UNKS=$(printf '%s\n' "$UNK" | sed -n 's/^UNKNOWN\t\([^\t]*\)\t\(.*\)$/\1（\2 条）/p')
+    if [ -n "$UNKS" ]; then
+      say "                 ⚠️  有不认识的类型:"
+      printf '%s\n' "$UNKS" | sed 's/^/                   /'
+      say "                 降级后这个会话可能整份读不了 → 用 dsh-strip"
+    else
+      say "                 ✅ 全部认识"
+    fi
+  fi
 
   say ""
   LAST=$(ls -t "$OUT_DIR"/dsh-backup-*.tar.gz 2>/dev/null | head -1)

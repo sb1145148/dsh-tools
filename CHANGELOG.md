@@ -1,5 +1,87 @@
 # 更新日志
 
+## 1.3.0 — 2026-10-23
+
+**新增 `dsh-strip`，并补上格式检查的盲区。**
+
+### 背景：日志是往前兼容、不往后兼容的
+
+有人从 0.2.1 降回 0.2.0，打开旧对话时报：
+
+```
+failed to observe session "session-1d500e2a-...":
+contains event type "job/registered" (seq 14511)
+unknown to this harness and not marked ignorable;
+refusing to interpret the log
+— it was likely written by a newer harness
+```
+
+**0.2.1 加了一个事件类型 `job/registered`（后台任务登记）。
+0.2.0 不认识它，而它没被标记成「可忽略」——于是整份日志被拒绝解释。**
+
+**注意：不是跳过那一条，是整份拒读。**
+
+### ① 新增 `dsh-strip`
+
+```bash
+dsh-strip --list session.v4.jsonl.zstd              # 看有哪些事件类型
+dsh-strip --dry-run session.v4.jsonl.zstd job/registered job/settled
+dsh-strip session.v4.jsonl.zstd job/registered job/settled
+```
+
+**做法**：删掉指定类型的事件，把剩下的 seq 重排成连续的，其它一行不动。
+
+**实测（真实会话，15,176 行 / 14 MB）：**
+
+```console
+🔪 剥离: job/registered job/settled
+   保留 15041 行，剥离 142 行，重排 seq 1..15040
+      job/settled: 71 条
+      job/registered: 71 条
+🗜  压缩...
+
+✅ 完成
+   大小: 5269859 字节（原 14138834）
+   残留指定类型: 0
+```
+
+**验证**：非 `job/*` 的事件数 **0 个不一致**，seq 连续 1..15040。
+
+**⚠️ 必须停 Web 再操作** —— 会话文件是活的，边读边写。
+
+### ② 补上格式检查的盲区
+
+1.2.0 只查文件名里的 `v4`。**这次的坑不在文件名，在日志内部。**
+
+`dsh-backup --check` 现在会解开最近改动的那个会话，扫一遍事件类型：
+
+```console
+  事件类型:
+                 37 种 / 15192 条
+                 ✅ 全部认识
+```
+
+遇到不认识的：
+
+```console
+  事件类型:
+                 6 种 / 6 条
+                 ⚠️  有不认识的类型:
+                   brand/new/type（1 条）
+                 降级后这个会话可能整份读不了 → 用 dsh-strip
+```
+
+### ③ `install.sh` 现在装 4 个工具
+
+`dsh-backup` / `dsh-restore` / `dsh-repair` / `dsh-strip`
+
+### 建议的解法顺序
+
+1. **升回写这份日志的版本** —— 正统做法
+2. 必须留在旧版本时，才用 `dsh-strip`
+
+**剥掉事件是单向下坡，以后升回去还得再处理一次。**
+
 ## 1.2.0 — 2026-10-23
 
 **加格式检测。官方关了 issue，这个工具得自己扛。**
