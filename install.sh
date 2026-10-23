@@ -25,7 +25,7 @@ say ""
 mkdir -p "$PREFIX" 2>/dev/null || true
 [ -w "$PREFIX" ] || { say "❌ $PREFIX 不可写。加 sudo，或换 --prefix ~/bin"; exit 1; }
 
-for f in dsh-backup dsh-restore; do
+for f in dsh-backup dsh-restore dsh-repair; do
   if [ -e "$PREFIX/$f" ]; then
     mv "$PREFIX/$f" "$PREFIX/$f.old"
     say "   💾 旧版存为 $f.old"
@@ -45,4 +45,5 @@ say ""
 say "用法："
 say "   dsh-backup                  备份"
 say "   dsh-restore <包路径>         还原"
-say "   dsh-restore --help          看帮助"
+say "   dsh-restore --help          看还原帮助
+   dsh-repair --check          检查会话日志有没有断档"

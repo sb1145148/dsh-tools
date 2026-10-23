@@ -176,9 +176,9 @@ Send the output to the AI so it can inspect them.
 
 ---
 
-## 🆘 Error on the new device? Check these three things first
+## 🆘 Error on the new device? Check these in order
 
-**90% of migration problems are one of these three.** Check in order.
+**90% of migration problems are here.** Check in order.
 
 ---
 
@@ -290,6 +290,37 @@ pwd                     # current workspace
 
 ---
 
+### ④ Opening a session reports a seq gap
+
+**Opening an old conversation shows:**
+
+```
+stored session "session-xxx" is corrupt:
+... has seq gap (expected 14467, got 14619)
+```
+
+**The session log itself has non-contiguous `seq` values** — usually when resuming
+a session the counter jumped.
+
+**This is not a backup problem** — the source file was already like that; the backup
+copied it faithfully.
+
+**Fix:**
+
+```bash
+apt-get install -y zstd      # dsh-repair needs zstd
+dsh-repair --check           # see which sessions have gaps
+dsh-repair                   # repair them
+```
+
+Then restart Web.
+
+The original is kept as `.before-repair`. **No content is lost — only renumbered.**
+
+**⚠️ Don't repair the session that's currently in use** — the app is still writing to it.
+
+---
+
 ### 📊 Error → cause
 
 | What you see | Which check |
@@ -299,6 +330,7 @@ pwd                     # current workspace
 | `❌ 找不到文件: /sdcard/...` | **② wrong path** |
 | Restore succeeded but no conversations | **③ name mismatch** |
 | Only the usage message printed | Argument split by spaces → **quote it** |
+| `seq gap` when opening a session | **④ log gap → `dsh-repair`** |
 
 ---
 

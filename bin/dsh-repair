@@ -1,0 +1,153 @@
+#!/bin/sh
+# ============================================================
+#  dsh-repair —— 修会话日志的 seq 断档
+#
+#  症状（应用里看到的）：
+#    stored session "session-xxx" is corrupt:
+#    invalid committed event at line N: released v2 row M
+#    has seq gap (expected M, got K)
+#
+#  原因：会话日志里的 seq 不连续。常见于「恢复会话」时
+#  seq 计数器跳了，中间一段写去了别处。
+#
+#  做法：把断点之后的 seq 整体前移，让它重新连续。
+#  内容一行不丢，只是重新编号。
+#
+#  用法:
+#    dsh-repair                 # 修所有会话（有断档的才动）
+#    dsh-repair <session 目录>   # 修指定的
+#    dsh-repair --check         # 只检查，不改
+# ============================================================
+set -u
+
+HOME_DIR="${HOME:-/root}"
+SESS_ROOT="$HOME_DIR/.dsh/sessions"
+MODE="fix"
+TARGET=""
+
+case "${1:-}" in
+  -h|--help) MODE="help" ;;
+  --check)   MODE="check" ;;
+  "")        TARGET="" ;;
+  *)         TARGET="$1" ;;
+esac
+
+say() { printf '%s\n' "$*"; }
+die() { printf '❌ %s\n' "$*" >&2; exit 1; }
+
+if [ "$MODE" = "help" ]; then
+  cat <<'HLP'
+用法: dsh-repair [选项] [session 目录]
+
+  修会话日志的 seq 断档（应用报 "seq gap" 时用）。
+
+  --check    只检查，不改文件
+  (无参数)   检查并修复所有会话
+
+需要 zstd。没装的话先: apt-get install -y zstd
+HLP
+  exit 0
+fi
+
+command -v zstd >/dev/null 2>&1 || die "需要 zstd。先装: apt-get install -y zstd"
+
+check_one() {
+  f="$1"
+  zstd -dc "$f" 2>/dev/null | python3 -c "
+import sys, json
+rows = 0; prev = None; gaps = []
+for raw in sys.stdin.buffer:
+    if not raw.strip(): continue
+    try: o = json.loads(raw)
+    except Exception: continue
+    rows += 1
+    s = o.get('seq')
+    if s is None: continue
+    if prev is not None and s != prev + 1:
+        gaps.append((prev, s))
+    prev = s
+print(json.dumps({'rows': rows, 'gaps': gaps}))
+"
+}
+
+fix_one() {
+  f="$1"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/dsh-repair.XXXXXX") || return 1
+  if zstd -dc "$f" 2>/dev/null | python3 -c '
+import sys, json
+rows = [json.loads(r) for r in sys.stdin.buffer if r.strip()]
+prev_raw = None; shift = 0; breaks = 0
+cuts = []
+for r in rows:
+    s = r.get("seq")
+    if s is None: continue
+    if prev_raw is not None and s != prev_raw + 1:
+        shift += s - (prev_raw + 1); breaks += 1; cuts.append(s)
+    prev_raw = s
+if breaks:
+    prev_raw = None; shift = 0
+    for r in rows:
+        s = r.get("seq")
+        if s is None: continue
+        if prev_raw is not None and s != prev_raw + 1:
+            shift += s - (prev_raw + 1)
+        if shift:
+            r["seq"] = s - shift
+            if r.get("sourceEventSeqs"):
+                r["sourceEventSeqs"] = [(x - shift) if any(x >= c for c in cuts) else x for x in r["sourceEventSeqs"]]
+        prev_raw = s
+sys.stderr.write(f"{breaks} {shift}\n")
+for r in rows:
+    sys.stdout.write(json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n")
+' 2>"$tmp.stat" | zstd -q -o "$tmp" -; then
+    read -r breaks shift < "$tmp.stat" 2>/dev/null || { breaks=0; shift=0; }
+    if [ "${breaks:-0}" -gt 0 ]; then
+      cp -a "$f" "$f.before-repair"
+      mv "$tmp" "$f"
+      chmod 600 "$f"
+      say "  ✅ 修好：${breaks} 处断档，${shift} 个 seq 前移（原文件存为 .before-repair）"
+    else
+      rm -f "$tmp"
+      say "  ⏭  没有断档"
+    fi
+  else
+    rm -f "$tmp"
+    say "  ❌ 处理失败"
+  fi
+}
+
+# ---- 收集目标 ----
+if [ -n "$TARGET" ]; then
+  [ -d "$TARGET" ] || die "找不到目录: $TARGET"
+  SET=$(find "$TARGET" -name "session.v4.jsonl.zstd" 2>/dev/null)
+else
+  [ -d "$SESS_ROOT" ] || die "找不到 $SESS_ROOT"
+  SET=$(find "$SESS_ROOT" -name "session.v4.jsonl.zstd" 2>/dev/null)
+fi
+
+[ -n "$SET" ] || die "没找到任何会话文件"
+
+say "🔍 扫描会话..."
+echo "$SET" | while IFS= read -r f; do
+  name=$(basename "$(dirname "$f")")
+  res=$(check_one "$f")
+  rows=$(printf '%s' "$res" | python3 -c "import json,sys;print(json.load(sys.stdin)['rows'])" 2>/dev/null || echo 0)
+  ngap=$(printf '%s' "$res" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['gaps']))" 2>/dev/null || echo 0)
+  if [ "$ngap" -gt 0 ]; then
+    printf '  ⚠️  %s  %s 行，%s 处断档\n' "$name" "$rows" "$ngap"
+    printf '%s' "$res" | python3 -c "
+import json,sys
+for a,b in json.load(sys.stdin)['gaps'][:3]:
+    print(f'        seq {a} → {b}（断了 {b-a-1}）')
+" 2>/dev/null
+    if [ "$MODE" = "fix" ]; then
+      fix_one "$f"
+    fi
+  else
+    printf '  ✅ %s  %s 行，连续\n' "$name" "$rows"
+  fi
+done
+
+say ""
+say "完成。"
+[ "$MODE" = "check" ] && say "（--check 模式，没有改动任何文件）"
