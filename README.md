@@ -414,11 +414,18 @@ dsh-backup --check
                  tar      ✅
                  zstd     ✅（可选）
 
-  上次备份:      2026-10-23 05:30:11
-                 dsh-backup-20261023-0530.tar.gz  72M
+  事件类型:
+                 37 种 / 15192 条
+                 ✅ 全部认识
+
+  上次备份:      2026-10-23 14:39:35
+                 dsh-backup-20261023-1439.tar.gz  84M
 
   ✅ 可以正常备份
 ```
+
+**「事件类型」这一项就是 1.3.0 补的。** 文件名里的 `v4` 只能说明大版本对得上，
+真正的破坏往往在日志内部 —— 新版本加了一个事件类型，旧版本整份拒读。
 
 **为什么需要这一步：**
 
@@ -434,6 +441,61 @@ DSHA 的会话文件叫 `session.v4.jsonl.zstd` —— `v4` 是格式版本。
 ```
 
 **不认识的格式直接停下，要越过得显式加 `--force`。**
+
+## 🔪 降级后旧对话打不开？用 dsh-strip
+
+**症状：**
+
+```
+failed to observe session "session-xxx":
+contains event type "job/registered" (seq 14511)
+unknown to this harness and not marked ignorable;
+refusing to interpret the log
+— it was likely written by a newer harness
+```
+
+**原因：日志是往前兼容、不往后兼容的。**
+
+新版本加了一个事件类型，旧版本不认识 —— **不是跳过那一条，是整份拒读。**
+
+---
+
+**解法有两个，按顺序试：**
+
+### ① 升回写这份日志的版本（推荐）
+
+日志是它写的，它当然读得懂。
+
+### ② 剥掉不认识的事件（必须留在旧版本时）
+
+```bash
+# 先看这个会话里有哪些事件类型
+dsh-strip --list ~/.dsh/sessions/*/session-xxx/session.v4.jsonl.zstd
+
+# 看看会删多少，不写盘
+dsh-strip --dry-run <文件> job/registered job/settled
+
+# 真删
+dsh-strip <文件> job/registered job/settled
+```
+
+**它会删掉指定类型，把 seq 重排成连续的，其它一行不动。**
+
+```console
+🔪 剥离: job/registered job/settled
+   保留 15041 行，剥离 142 行，重排 seq 1..15040
+🗜  压缩...
+
+✅ 完成
+   大小: 5269859 字节（原 14138834）
+   残留指定类型: 0
+```
+
+⚠️ **必须停 Web 再操作** —— 会话文件是活的，边读边写。
+
+⚠️ **这是单向下坡** —— 以后升回去还得再处理一次。
+
+---
 
 ## 🤔 为什么需要它
 
