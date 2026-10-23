@@ -63,23 +63,36 @@ say "   大小: $BYTES 字节"
 
 [ "$BYTES" -ge 1024 ] || die "文件只有 $BYTES 字节，肯定没传完。重新传一次。"
 
-# ---- 是不是 gzip ----
-MAGIC=$(od -An -tx1 -N2 "$PKG" 2>/dev/null | tr -d ' \n')
-case "$MAGIC" in
-  1f8b) : ;;
-  504b) die "这不是 gzip 文件（魔数 504b = zip 压缩包）。
-   传输工具可能把它压成了 zip。试试: unzip \"$PKG\"" ;;
-  "")   die "读不出文件头（大小 $BYTES 字节）。文件可能是空的或被占用。" ;;
-  *)    die "这不是 gzip 文件（魔数 $MAGIC）。
-   文件可能被改动过，或被转成了别的格式。" ;;
-esac
+# ---- 能不能读 ----
+[ -r "$PKG" ] || die "文件读不了（权限问题）。试试: chmod 644 \"$PKG\""
 
-# ---- 完整性 ----
+# ---- 魔数（可选查）----
+# ⚠️ od 不是每个环境都装。装了就用它提前认出 zip；没装就跳过，
+#    交给下面的 gzip -t —— 它不依赖任何额外工具，才是权威判断。
+if command -v od >/dev/null 2>&1; then
+  MAGIC=$(od -An -tx1 -N2 "$PKG" 2>/dev/null | tr -d ' \n')
+  if [ "$MAGIC" = "504b" ]; then
+    die "这不是 gzip 文件（魔数 504b = zip 压缩包）。
+   传输工具可能把它压成了 zip。试试: unzip \"$PKG\""
+  fi
+fi
+
+# ---- 完整性（权威判断）----
 if ! GZERR=$(gzip -t "$PKG" 2>&1); then
   say ""
   say "gzip 的原始报错:"
   printf '%s\n' "$GZERR" | sed 's/^/   /'
-  die "包不完整（大小 $BYTES 字节）。多半是传输中断，重新传一次。"
+  say ""
+  case "$GZERR" in
+    *"not in gzip format"*)
+      die "不是 gzip 格式。文件可能被改名或转成了别的压缩格式。
+   看看它的真面目: file \"$PKG\"（如果装了 file）" ;;
+    *"unexpected end of file"*|*"unexpected EOF"*)
+      die "包不完整（大小 $BYTES 字节，比正常的小）。
+   多半是传输中断，重新传一次。" ;;
+    *)
+      die "包校验失败（大小 $BYTES 字节）。把上面的报错发给 AI 帮你看。" ;;
+  esac
 fi
 say "   完整性: ✅ gzip 校验通过"
 
