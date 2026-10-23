@@ -1,5 +1,52 @@
 # 更新日志
 
+## 1.1.2 — 2026-10-23
+
+修 `dsh-repair` 两个 bug。
+
+**① `zstd -o` 拒绝覆盖 `mktemp` 建的空文件**
+
+```
+zstd: /tmp/dsh-repair.eEfTxQ already exists; not overwritten
+❌ 处理失败
+```
+
+`mktemp` 会先创建文件，`zstd -o` 默认不覆盖。加 `-f`。
+
+**② `--check` 不接受路径参数**
+
+```sh
+case "${1:-}" in
+  --check)   MODE="check" ;;   # $1 是 --check
+  *)         TARGET="$1" ;;    # 永远走不到
+esac
+```
+
+`dsh-repair --check /某个目录` 里那个目录被忽略，扫的是全部会话。
+
+改成遍历所有参数：
+
+```sh
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) MODE="help" ;;
+    --check)   MODE="check" ;;
+    *)         [ -z "$TARGET" ] && TARGET="$arg" ;;
+  esac
+done
+```
+
+现在选项和路径可以任意顺序。
+
+**实测：**
+
+```
+【修前】⚠️  14677 行，1 处断档  seq 14466 → 14619（断了 152）
+【修】  ✅ 修好：1 处断档，152 个 seq 前移
+【修后】✅  14677 行，连续
+【完整性】修复前后解压都是 48,349,715 字节 ✅
+```
+
 ## 1.1.1 — 2026-10-23
 
 `dsh-backup` 现在会主动检查会话连续性。

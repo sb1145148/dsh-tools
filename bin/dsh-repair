@@ -25,12 +25,14 @@ SESS_ROOT="$HOME_DIR/.dsh/sessions"
 MODE="fix"
 TARGET=""
 
-case "${1:-}" in
-  -h|--help) MODE="help" ;;
-  --check)   MODE="check" ;;
-  "")        TARGET="" ;;
-  *)         TARGET="$1" ;;
-esac
+# 选项和路径可以任意顺序出现
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) MODE="help" ;;
+    --check)   MODE="check" ;;
+    *)         [ -z "$TARGET" ] && TARGET="$arg" ;;
+  esac
+done
 
 say() { printf '%s\n' "$*"; }
 die() { printf '❌ %s\n' "$*" >&2; exit 1; }
@@ -99,7 +101,7 @@ if breaks:
 sys.stderr.write(f"{breaks} {shift}\n")
 for r in rows:
     sys.stdout.write(json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n")
-' 2>"$tmp.stat" | zstd -q -o "$tmp" -; then
+' 2>"$tmp.stat" | zstd -q -f -o "$tmp" -; then
     read -r breaks shift < "$tmp.stat" 2>/dev/null || { breaks=0; shift=0; }
     if [ "${breaks:-0}" -gt 0 ]; then
       cp -a "$f" "$f.before-repair"
