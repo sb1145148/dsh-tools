@@ -305,7 +305,8 @@ case "$GAPS" in *[!0-9]*|"") GAPS=0;; esac
 case "$NC_COUNT" in *[!0-9]*|"") NC_COUNT=0;; esac
 
 # ---- 3. 备份新鲜度 ----
-LAST_BK=$(ls -t /sdcard/Download/dsh-backup/dsh-backup-*.tar.gz 2>/dev/null | head -1)
+LAST_BK=$(ls -t /sdcard/Download/dsh-backup-*.tar.gz \
+               /sdcard/Download/dsh-backup/dsh-backup-*.tar.gz 2>/dev/null | head -1)
 if [ -n "$LAST_BK" ]; then
   BK_AGE=$(( (NOW - $(stat -c %Y "$LAST_BK" 2>/dev/null || echo "$NOW")) / 86400 ))
 else

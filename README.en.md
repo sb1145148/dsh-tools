@@ -29,7 +29,7 @@ You should see something like:
 
 ```
 ✅ 完成
-   文件: /sdcard/Download/dsh-backup/dsh-backup-20261022-1244.tar.gz
+   文件: /sdcard/Download/dsh-backup-20261022-1244.tar.gz
    大小: 59M
    条目: 1019
    软链: 0（逃逸型 0）
@@ -76,7 +76,7 @@ Two ✅ means it's installed.
 ## 📁 Where is the backup file
 
 ```
-/sdcard/Download/dsh-backup/dsh-backup-<date>-<time>.tar.gz
+/sdcard/Download/dsh-backup-<date>-<time>.tar.gz
 ```
 
 Each backup gets a new timestamped filename — old ones are never overwritten.
@@ -394,7 +394,7 @@ build then rejects. Back and forth makes things worse.
 
 | Command | What it does |
 | --- | --- |
-| `dsh-backup` | Back up to `/sdcard/Download/dsh-backup/` |
+| `dsh-backup` | Back up to `/sdcard/Download/` (filename prefixed `dsh-backup-`) |
 | `dsh-restore` | Restore (never overwrites files newer than the backup) |
 | `dsh-doctor` | One-shot check: frame layout / seq / index / event types / backup age |
 | `dsh-reframe` | Fix frame layout (first frame must be exactly one line) |
@@ -423,7 +423,7 @@ sh install.sh --prefix ~/bin
 dsh-backup
 
 # restore (leaves state files alone; never overwrites newer files)
-dsh-restore /sdcard/Download/dsh-backup/xxx.tar.gz
+dsh-restore /sdcard/Download/dsh-backup-xxx.tar.gz
 
 # preview only, writes nothing (safe)
 dsh-restore xxx.tar.gz --dry-run

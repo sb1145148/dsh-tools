@@ -2,7 +2,7 @@
 # ============================================================
 #  dsh-backup —— 一键打包 DSH 数据
 #
-#  输出到 /sdcard/Download/dsh-backup/dsh-backup-<时间>.tar.gz
+#  输出到 /sdcard/Download/dsh-backup-<时间>.tar.gz
 #
 #  为什么不用应用自带的「备份与恢复」：
 #    它生成的 portable.dshbak 里含指向包外的软链，
@@ -14,7 +14,7 @@ set -u
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
 STAMP=$(date +%Y%m%d-%H%M)
-OUT_DIR="/sdcard/Download/dsh-backup"
+OUT_DIR="/sdcard/Download"
 OUT="$OUT_DIR/dsh-backup-$STAMP.tar.gz"
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/dsh-backup.XXXXXX")
 ROOT="$STAGE/dsh-backup-$STAMP"
@@ -188,7 +188,8 @@ for t, c in sorted(unk.items(), key=lambda x: -x[1]):
   fi
 
   say ""
-  LAST=$(ls -t "$OUT_DIR"/dsh-backup-*.tar.gz 2>/dev/null | head -1)
+  # 新位置（Download 根）优先，老位置也兼容
+  LAST=$(ls -t "$OUT_DIR"/dsh-backup-*.tar.gz /sdcard/Download/dsh-backup/dsh-backup-*.tar.gz 2>/dev/null | head -1)
   if [ -n "$LAST" ]; then
     say "  上次备份:      $(stat -c %y "$LAST" 2>/dev/null | cut -c1-19)"
     say "                 $(basename "$LAST")  $(du -h "$LAST" | cut -f1)"
@@ -389,7 +390,7 @@ cat > "$ROOT/README.md" <<EOF
 ## 还原
 
 \`\`\`bash
-dsh-restore /sdcard/Download/dsh-backup/dsh-backup-$STAMP.tar.gz
+dsh-restore $OUT
 \`\`\`
 
 ## 里面有什么

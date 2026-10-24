@@ -29,7 +29,7 @@ dsh-restore <包>    # 还原
 
 ```
 ✅ 完成
-   文件: /sdcard/Download/dsh-backup/dsh-backup-20261022-1244.tar.gz
+   文件: /sdcard/Download/dsh-backup-20261022-1244.tar.gz
    大小: 59M
    条目: 1019
    软链: 0（逃逸型 0）
@@ -95,13 +95,13 @@ dsh-backup
 ## 📁 备份文件在哪
 
 ```
-/sdcard/Download/dsh-backup/dsh-backup-<日期>-<时间>.tar.gz
+/sdcard/Download/dsh-backup-<日期>-<时间>.tar.gz
 ```
 
 **用手机的文件管理器打开：**
 
 ```
-文件管理 → Download → dsh-backup
+文件管理 → Download
 ```
 
 **文件名带时间，每次备份都是新文件，不会覆盖旧的。**
@@ -648,7 +648,7 @@ DSHA 自带的「备份与恢复」目前有个 bug：
 
 | 命令 | 干什么 |
 | --- | --- |
-| `dsh-backup` | 备份到 `/sdcard/Download/dsh-backup/` |
+| `dsh-backup` | 备份到 `/sdcard/Download/`（文件名带 `dsh-backup-` 前缀） |
 | `dsh-restore` | 还原（不覆盖比备份新的文件） |
 | `dsh-doctor` | 一体检：帧布局 / seq / 索引 / 事件类型 / 备份新鲜度 |
 | `dsh-reframe` | 修帧布局（首帧必须恰好一行） |
@@ -727,7 +727,7 @@ sh install.sh --prefix ~/bin
 dsh-backup
 
 # 还原（默认不动状态文件，且不覆盖比备份新的文件）
-dsh-restore /sdcard/Download/dsh-backup/xxx.tar.gz
+dsh-restore /sdcard/Download/dsh-backup-xxx.tar.gz
 
 # 先看看会做什么，不实际写（安全）
 dsh-restore xxx.tar.gz --dry-run
