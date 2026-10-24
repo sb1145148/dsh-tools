@@ -1,5 +1,48 @@
 # 更新日志
 
+## 2.0.7 — 2026-10-24
+
+**`dsh-doctor` 会把已经手工移出的会话又算一遍。**
+
+### 现象
+
+按提示把空会话改名成 `xxx.disabled` 之后：
+
+```console
+空会话:     ⚠️  4 个
+   --root-deepseek-harness--/session-9f36469e-....disabled/session.v4.jsonl.zstd
+   ...
+
+处理：复制执行：
+   for d in \
+     ".../session-9f36469e-....disabled" \
+   ; do mv "$d" "$d.disabled"; done        ← 会变成 .disabled.disabled
+```
+
+**改名没生效，而且建议的命令会把目录改成 `xxx.disabled.disabled`。**
+
+### 原因
+
+扫描用的是 `glob('**/session.v*.jsonl.zstd')`，**不区分目录名**。
+`.disabled` 目录里的会话照旧被扫进来。
+
+### 改法
+
+扫描前先过滤：**路径里任何一段以 `.disabled` / `.deleted` 结尾的，跳过。**
+
+```python
+def _active(path):
+    for p in path.split(os.sep):
+        if p.endswith('.disabled') or p.endswith('.deleted'):
+            return False
+    return True
+```
+
+### 顺带
+
+- 建议命令加了 `case` 判断，已经有 `.disabled` 后缀的不会再叠一层
+- 「工作区索引」那栏的 `索引有、磁盘没有` 就是这些移出的会话，属于预期，不用管
+
 ## 2.0.6 — 2026-10-24
 
 **加了「空会话」检测 —— 这类会话会让应用报错，但之前工具看不见。**

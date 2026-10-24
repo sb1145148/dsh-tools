@@ -23,7 +23,7 @@
 # ============================================================
 set -u
 
-TOOLS_VERSION="2.0.6"
+TOOLS_VERSION="2.0.7"
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
 SESS="$DSH/sessions"
@@ -215,7 +215,17 @@ known = set(os.environ['KNOWN_EVENTS'].split())
 LIVE_WINDOW = 120.0   # 秒。这之内被改过的文件，很可能正在被写入
 now = time.time()
 
-for path in sorted(glob.glob(os.path.join(root, '**', 'session.v*.jsonl.zstd'), recursive=True)):
+def _active(path):
+    # 跳过已经被手工移出的会话：目录名以 .disabled 结尾，
+    # 或者文件名叫 session.v4.jsonl.zstd.disabled 之类。
+    parts = path.split(os.sep)
+    for p in parts:
+        if p.endswith('.disabled') or p.endswith('.deleted'):
+            return False
+    return True
+
+_all = sorted(glob.glob(os.path.join(root, '**', 'session.v*.jsonl.zstd'), recursive=True))
+for path in [p for p in _all if _active(p)]:
     # 正在写入的会话不要判它「断档 / 撕裂」——
     # 读到一半时最后那个帧本来就只有半条记录，是正常的进行态。
     try:
