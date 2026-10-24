@@ -93,7 +93,9 @@ for wid, w in tables.items():
         by_key[path_to_key(p)] = wid
 
 report = []
-changes = 0
+changes = 0      # 能自动修的（索引缺会话）
+new_ws = 0       # 磁盘有会话、但没有对应工作区（按会话数累计）
+gone_n = 0       # 索引里有、磁盘上没有（按条目数累计）
 
 for key, sids in sorted(disk.items()):
     wid = by_key.get(key)
@@ -103,6 +105,7 @@ for key, sids in sorted(disk.items()):
         # 磁盘上有会话，但 workspace.json 里没有这个工作区。
         # 路径没法从 key 反推（'-' 有歧义），所以只报告，不擅自编造。
         report.append(f'NEWWS\t{key}\t{len(sids)}')
+        new_ws += len(sids)
         continue
 
     w = tables[wid]
@@ -124,6 +127,7 @@ for key, sids in sorted(disk.items()):
     gone = [s for s in have_ids if s not in sids]
     if gone:
         report.append(f'GONE\t{path}\t{len(gone)}\t{" ".join(sorted(gone))}')
+        gone_n += len(gone)
 
 if fix and changes:
     shutil.copy2(ws_path, ws_path + '.before-reindex')
@@ -133,7 +137,7 @@ if fix and changes:
         f.write('\n')
     os.replace(tmp, ws_path)
 
-print(f'CHANGES\t{changes}')
+print(f'CHANGES\t{changes}\t{new_ws}\t{gone_n}')
 for line in report:
     print(line)
 PY
@@ -151,17 +155,41 @@ echo "$RESULT" | grep -v '^CHANGES' | while IFS="$(printf '\t')" read -r tag a b
   esac
 done
 
-CH=$(echo "$RESULT" | sed -n 's/^CHANGES\t//p')
-CH=${CH:-0}
+# CHANGES 行现在是三列：能自动修的 / 没有工作区的 / 索引指向缺失文件的
+CHLINE=$(echo "$RESULT" | sed -n 's/^CHANGES[[:space:]]*//p')
+CH=$(echo "$CHLINE" | cut -f1);  CH=${CH:-0}
+NEWWS_N=$(echo "$CHLINE" | cut -f2); NEWWS_N=${NEWWS_N:-0}
+GONE_N=$(echo "$CHLINE" | cut -f3);  GONE_N=${GONE_N:-0}
+case "$CH" in *[!0-9]*|"") CH=0;; esac
+case "$NEWWS_N" in *[!0-9]*|"") NEWWS_N=0;; esac
+case "$GONE_N" in *[!0-9]*|"") GONE_N=0;; esac
 echo ""
+# 汇总要说实话：能自动修的、和需要人处理的，分开说。
+# 以前这里只看 CH（能自动修的数量），于是「有 11 个会话没有工作区」
+# 的警告下面跟着一句「✅ 索引和磁盘一致」—— 自相矛盾。
 if [ "$FIX" = "0" ]; then
+  TOTAL_ISSUE=$((CH + NEWWS_N + GONE_N))
+
   if [ "$CH" -gt 0 ] 2>/dev/null; then
-    say "需要对齐。执行："
+    say "需要对齐 $CH 处（磁盘上有、索引里缺）。执行："
     say "  dsh-reindex --fix"
     say ""
     say "⚠️  先停 Web（应用里 停止 → 启动）"
+    [ "$NEWWS_N" -gt 0 ] && say "ℹ️  另有 $NEWWS_N 个会话没有对应工作区，--fix 也处理不了，见上面说明"
+    [ "$GONE_N" -gt 0 ]  && say "ℹ️  另有 $GONE_N 个索引项指向不存在的会话文件"
     exit 1
   fi
+
+  if [ "$NEWWS_N" -gt 0 ] || [ "$GONE_N" -gt 0 ]; then
+    say "⚠️  没有能自动修的项，但有 $TOTAL_ISSUE 处需要你处理："
+    [ "$NEWWS_N" -gt 0 ] && say "   · $NEWWS_N 个会话所在的目录在 workspace.json 里没有对应工作区"
+    [ "$GONE_N" -gt 0 ]  && say "   · $GONE_N 个索引项指向不存在的会话文件"
+    say ""
+    say "工作区缺的那种，去应用里打开一次那个目录，应用会自己建。"
+    say "建好之后再跑一次 dsh-reindex --fix。"
+    exit 1
+  fi
+
   say "✅ 索引和磁盘一致"
   exit 0
 fi
@@ -176,8 +204,16 @@ fi
 
 if [ "$CH" -gt 0 ] 2>/dev/null; then
   say "✅ 已写回 workspace.json（原文件存为 workspace.json.before-reindex）"
+  [ "$NEWWS_N" -gt 0 ] && say "ℹ️  还有 $NEWWS_N 个会话没有对应工作区 —— 去应用里打开一次那目录会自己建"
+  [ "$GONE_N" -gt 0 ]  && say "ℹ️  还有 $GONE_N 个索引项指向不存在的会话文件（无害，可忽略）"
   say ""
   say "下一步：启动 Web，看对话列表"
 else
-  say "✅ 没有需要改的"
+  if [ "$NEWWS_N" -gt 0 ] || [ "$GONE_N" -gt 0 ]; then
+    say "ℹ️  没有需要写回的改动。"
+    [ "$NEWWS_N" -gt 0 ] && say "   但还有 $NEWWS_N 个会话没有对应工作区 —— 去应用里打开一次那目录会自己建"
+    [ "$GONE_N" -gt 0 ]  && say "   另有 $GONE_N 个索引项指向不存在的会话文件（无害）"
+  else
+    say "✅ 没有需要改的"
+  fi
 fi
