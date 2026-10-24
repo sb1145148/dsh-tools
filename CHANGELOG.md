@@ -1,5 +1,78 @@
 # 更新日志
 
+## 2.0.9 — 2026-10-24
+
+**我上一版建议的 `mv xxx xxx.disabled`，会把整个工作区服务弄挂。**
+
+### 实测复现
+
+在隔离实例里（另一个 DSH_HOME、另一个端口）把一个会话目录改成 `.disabled` 后启动：
+
+```console
+workspace (@deepseek-ai/dsh-workspace): Error: corrupt session log
+  ".../session-9f36469e-....disabled/session.v4.jsonl.zstd":
+  header id "session-9f36469e-..." and cwd identify
+  ".../session-9f36469e-.../session.v4.jsonl.zstd"
+
+session-controller: pending (waiting for service: workspaceRegistry)
+```
+
+**后果比原来的「空会话报错」严重得多：**
+
+```
+WorkspaceRegistry 加载失败
+   ↓
+WorkspaceController / SessionController 全部 pending
+   ↓
+对话列表空掉、打开文件夹也失败
+```
+
+### 原因
+
+**harness 会用 header 里的 `id` + `cwd` 反推「这个会话应该在的路径」，再和实际路径比对。**
+
+```
+sessions/
+  --root-deepseek-harness--/      ← 由 cwd 推出，不能改
+    session-1aaf44ea-.../         ← 由 id 推出，不能改
+      session.v4.jsonl.zstd
+```
+
+目录名是**结构的一部分**，不是随便起的。
+
+### 三种方案实测
+
+| 方案 | 结果 |
+| --- | --- |
+| **A** 改名改回来（`.disabled` → 原名） | ✅ `corrupt=0` `registry-pending=0` 正常启动 |
+| **B** 搬到 `sessions/` 外面 | ✅ 正常启动 |
+| **C** 原地不动 | ✅ 正常 |
+
+**A 和 B 都能修，但 B 是正确做法。**
+
+### 改法
+
+`dsh-doctor` 的空会话建议从「改名」改成「搬出 `sessions/`」：
+
+```bash
+mkdir -p /root/.dsh/_quarantine
+mv \
+  "/root/.dsh/sessions/--root-deepseek-harness--/session-1aaf44ea-..." \
+  "/root/.dsh/sessions/--root-deepseek-harness--/session-9f36469e-..." \
+  /root/.dsh/_quarantine/
+```
+
+并且明确写了警告：
+
+> ⚠️ 不要原地改名！harness 会用 header 里的 id + cwd 反推「应该在的路径」，
+> 路径对不上就判 corrupt，连带把 workspaceRegistry 拖挂。
+
+### 教训
+
+**工具给出的「修复建议」本身可能造成比原问题更严重的损坏。**
+
+以后凡是涉及改路径、改文件名的建议，都得先想清楚**谁会拿这个路径去校验**。
+
 ## 2.0.8 — 2026-10-24
 
 **一键安装一直 404 —— v2.0.7 我忘了传附件。**

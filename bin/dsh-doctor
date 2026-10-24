@@ -23,7 +23,7 @@
 # ============================================================
 set -u
 
-TOOLS_VERSION="2.0.7"
+TOOLS_VERSION="2.0.9"
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
 SESS="$DSH/sessions"
@@ -437,18 +437,24 @@ if [ "$EMPTY_N" -gt 0 ]; then
   say "     应用读它们可能报 corrupt / torn JSONL record —— 内容本身没问题，"
   say "     只是语义不完整（缺 session/end-seed）。"
   say ""
-  say "     处理：改名就等于让它们从列表消失，还能反悔。"
+  say "     ⚠️  不要原地改名！harness 会用 header 里的 id + cwd 反推「应该在的路径」，"
+  say "        路径对不上就判 corrupt，连带把 workspaceRegistry 拖挂 ——"
+  say "        结果是整个对话列表空掉、打开文件夹也失败。"
+  say ""
+  say "     正确做法：把它们搬到 sessions/ 外面（扫不到就不会报错）。"
   say "     先停 Web，再复制执行："
   say ""
-  say "       for d in \\"
-  # 逐个列出会话目录（不含文件名），拼成能直接粘的命令
-  grep '^EMPTY' "$T/issues" | cut -f2 | sed 's|/session\.v[0-9]*\.jsonl\.zstd$||' | while IFS= read -r d; do
-    say "         \"$d\" \\"
+  say "       mkdir -p /root/.dsh/_quarantine"
+  # 直接拼一条 mv，多个源 + 一个目标目录 —— 不需要循环变量，
+  # 也就不会出现 \$d 被提前展开的问题
+  say "       mv \\"
+  grep '^EMPTY' "$T/issues" | cut -f2 | sed 's|/session\.v[0-9]*\.jsonl\.zstd$||' | while IFS= read -r _dir; do
+    say "         \"$_dir\" \\"
   done
-  say "       ; do mv \"\$d\" \"\$d.disabled\"; done"
+  say "         /root/.dsh/_quarantine/"
   say ""
   say "     （也可以直接忽略 —— 它们不占地方，只是每次会弹一个错误）"
-  say ""
+
 fi
 if [ "$FR_BAD" -gt 0 ]; then
   say "  ❌ 帧布局不对（应用会静默跳过，内容完好）:"
