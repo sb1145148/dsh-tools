@@ -1,5 +1,78 @@
 # 更新日志
 
+## 2.0.1 — 2026-10-24
+
+**审查仓库里另外两个工具的切帧逻辑，修了两处。**
+
+### ① `dsh-recover` 依赖 `zstd` 命令
+
+```sh
+have zstd || die "需要 zstd"
+```
+
+这个环境里 `zstd` 已被移除，它直接退出。改成用 `libzstd` + ctypes。
+
+### ② `dsh-strip` 丢掉了 `--mark`
+
+`dsh-recover` 靠 `dsh-strip --mark` 打 `ignorable` 标记，并且会先检查：
+
+```sh
+if ! dsh-strip --help | grep -q -- "--mark"; then
+  die "dsh-strip 太旧，不支持 --mark。"
+fi
+```
+
+2.0.0 把 `dsh-strip` 重写成 Python 时**漏了 `--mark`** —— 等于把 `dsh-recover` 弄瘸了。
+
+**`--mark` 才是正确做法。** harness 的判定是：
+
+```js
+if (!KNOWN_SESSION_EVENT_TYPES.has(event.type) && event.ignorable !== true)
+  throw unsupported(...)
+```
+
+给事件加 `"ignorable": true` 即可放行 —— **不删行、不动 seq**。
+
+而 1.5.x 那种「删除 + 重排 seq」会让应用内部计数器失配，
+之后它继续写又留下断档，会话再次从列表消失。
+
+**所以 `dsh-strip` 现在默认推荐 `--mark`，删除模式降为兜底。**
+
+实测：
+
+```console
+$ dsh-strip --mark s.zstd job/registered
+🔖 打 ignorable 标记: job/registered
+  共 10 行，打标 3 条，seq 一个没动
+
+✅ 完成: s.zstd.stripped
+   首帧一行 ✅  seq 未改动 ✅
+
+验证：行数 10 → 10（一行没少）  seq 完全没动  3 条带 ignorable ✅
+```
+
+### ③ `dsh-doctor` 加了工作区索引检查
+
+会话列表读的是 `workspace.json` 里的 `sessionIds`，**不是扫目录**。
+索引缺了 → 文件在、列表空。这是帧布局之外的**第二个独立原因**。
+
+```console
+工作区索引:
+             ⚠️  --root-deepseek-harness-- 下有 12 个会话，但 workspace.json 里没有对应工作区
+```
+
+### 审查结论
+
+| 工具 | 写会话吗 | 切帧正确吗 |
+| --- | --- | --- |
+| `dsh-recover` | ✅ 间接（调 `dsh-strip --mark`） | ✅ 交给 `dsh-strip` |
+| `dsh-reindex` | ❌ 只写 JSON | **不涉及** |
+
+### 现在 9 个工具
+
+`dsh-backup` / `dsh-restore` / `dsh-repair` / `dsh-strip` / `dsh-reframe` /
+`dsh-doctor` / `dsh-events` / `dsh-recover` / `dsh-reindex`
+
 ## 2.0.0 — 2026-10-24
 
 **修一个我自己造成的严重问题：工具把会话文件写坏了。**

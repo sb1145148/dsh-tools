@@ -20,10 +20,22 @@
 #     早期版本这里用 `zstd -o` 重压，写出来就是单帧，把好文件写坏过。
 #     现在改成：首帧只装 header 行，正文另起一帧。
 #
+#  两种修法，优先用 --mark：
+#
+#    --mark  给事件加 "ignorable": true —— **官方支持的放行方式**
+#            （validateStoredEvents 里就认这个字段）
+#            不删行、不动 seq，应用内部计数器不会失配。
+#
+#    默认    删掉事件 + 重排 seq。**不推荐**：删行会让应用内部的
+#            seq 计数器不同步，之后它继续写就会留下断档，
+#            整个会话又从列表里消失。只在 --mark 不奏效时兜底。
+#
 #  用法:
 #    dsh-strip --list <文件>                 看有哪些事件类型
+#    dsh-strip --mark <文件> <类型...>       打 ignorable 标记（推荐）
+#    dsh-strip --mark --dry-run <文件> <类型...>
 #    dsh-strip --dry-run <文件> <类型...>    只看会删多少
-#    dsh-strip <文件> <类型...>              真删
+#    dsh-strip <文件> <类型...>              真删（兜底，不推荐）
 #    dsh-strip --rollback                    回退（*.before-strip）
 #
 #  依赖：python3 + libzstd
@@ -146,17 +158,28 @@ def iter_events(content):
 def main():
     args = sys.argv[1:]
     mode = 'strip'
+    mark = False
     dry = False
     pos = []
 
     for a in args:
         if a in ('-h', '--help'):
-            print(__doc__)
+            # 文件头是 # 注释，不是 docstring —— 直接把那段打出来。
+            # dsh-recover 会 grep --mark，这里必须真的包含它。
+            for line in open(__file__, encoding='utf-8'):
+                if line.startswith('#!'):
+                    continue
+                if not line.startswith('#'):
+                    break
+                print(line.rstrip()[1:].lstrip('#').strip() if False else line.rstrip().lstrip('#').strip())
             return 0
         elif a == '--list':
             mode = 'list'
         elif a == '--dry-run':
             dry = True
+        elif a == '--mark':
+            mark = True
+            mode = 'mark'
         elif a == '--rollback':
             mode = 'rollback'
         elif a.startswith('-'):
@@ -237,6 +260,64 @@ def main():
     if not types:
         print('❌ 要指定事件类型。先用 --list 看看有哪些', file=sys.stderr)
         return 1
+
+
+    # ------------------------------------------------------------
+    #  --mark：给事件加 "ignorable": true（官方放行方式）
+    #
+    #  不删行、不动 seq —— 应用内部的 seq 计数器不会失配。
+    #  输出写到 <文件>.stripped，和 dsh-recover 的约定一致。
+    # ------------------------------------------------------------
+    if mode == 'mark':
+        print('🔖 打 ignorable 标记: %s' % ' '.join(types))
+        drop = set(types)
+        out_lines = []
+        marked = 0
+        seen_types = {t: 0 for t in types}
+        total = 0
+        for line in iter_events(content):
+            total += 1
+            try:
+                d = json.loads(line)
+            except Exception:
+                out_lines.append(line)
+                continue
+            t = d.get('type') or ''
+            if t in drop and d.get('ignorable') is not True:
+                d['ignorable'] = True
+                marked += 1
+                seen_types[t] += 1
+            out_lines.append(json.dumps(d, ensure_ascii=False, separators=(',', ':')).encode())
+
+        print('  共 %d 行，打标 %d 条，seq 一个没动' % (total, marked))
+        for t, c in seen_types.items():
+            print('    %s: %d 条' % (t, c))
+
+        if dry:
+            print()
+            print('（--dry-run，没有写任何文件）')
+            return 0
+
+        out = b'\n'.join(out_lines) + b'\n'
+        dst = path + '.stripped'
+        write_session(dst, out)
+
+        # 自检
+        if read_all(dst) != out:
+            os.unlink(dst)
+            print('❌ 自检失败（解回来不一致）', file=sys.stderr)
+            return 1
+        if not first_frame_is_one_line(dst):
+            os.unlink(dst)
+            print('❌ 自检失败（首帧不是一行）', file=sys.stderr)
+            return 1
+
+        print()
+        print('✅ 完成: %s' % os.path.basename(dst))
+        print('   首帧一行 ✅  seq 未改动 ✅')
+        print()
+        print('⚠️  调用方需要把它 mv 到原文件名（dsh-recover 会自动做）')
+        return 0
 
     print('🔪 剥离: %s' % ' '.join(types))
     drop = set(types)

@@ -23,7 +23,7 @@
 # ============================================================
 set -u
 
-TOOLS_VERSION="2.0.0"
+TOOLS_VERSION="2.0.1"
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
 SESS="$DSH/sessions"
@@ -320,6 +320,23 @@ case "$EVENTS_SOURCE" in
             say "              结论可能不准 —— 装了 dsh-events 才可靠" ;;
   *)        say "  事件表:     ❌ 不可用" ;;
 esac
+
+# ---- 工作区索引 ----
+# 会话列表读的是 workspace.json 里的 sessionIds，**不是扫目录**。
+# 索引缺了 → 文件在、列表空。这是「帧布局」之外的另一个独立原因。
+say ""
+say "工作区索引:"
+if have dsh-reindex; then
+  RX=$(dsh-reindex 2>&1 | grep -E "索引和磁盘|索引有、磁盘没有|没有对应工作区" | head -3)
+  if [ -z "$RX" ]; then
+    say "             ❓ 读不到状态"
+  else
+    printf '%s\n' "$RX" | sed 's/^ */             /'
+  fi
+else
+  say "             ⚠️  没装 dsh-reindex，这项没法查"
+fi
+
 say ""
 say "备份"
 if [ "$BK_AGE" -lt 0 ]; then
@@ -441,7 +458,7 @@ fi
 
 # --- 剥未知事件 ---
 if [ -n "$STRIP_TYPE" ]; then
-  say "  ▸ 剥指定事件类型: $STRIP_TYPE"
+  say "  ▸ 给事件打 ignorable 标记: $STRIP_TYPE"
   printf '%s\n' "$SESS_FILES" | while IFS= read -r f; do
     [ -n "$f" ] || continue
     :
