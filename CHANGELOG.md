@@ -1,5 +1,79 @@
 # 更新日志
 
+## 2.0.8 — 2026-10-24
+
+**一键安装一直 404 —— v2.0.7 我忘了传附件。**
+
+### 问题
+
+```sh
+URL="https://github.com/.../releases/download/v2.0.7/dsh-tools-2.0.7.tar.gz"
+```
+
+这个地址 404，因为 **v2.0.7 的 Release 只创建了、没有上传附件**。
+
+发版脚本里上传那段漏掉了：
+
+```python
+call(.../releases, 'POST', {...})     # 建了 Release
+subprocess.run(['tar','-czf', ...])   # 打了包
+# ← 从来没有上传
+```
+
+对比前几个版本：
+
+```
+v2.0.4  dsh-tools-2.0.4.tar.gz  361888
+v2.0.5  dsh-tools-2.0.5.tar.gz  362922
+v2.0.6  dsh-tools-2.0.6.tar.gz  366000
+v2.0.7  ❌ 没有附件
+```
+
+### 改法
+
+**① 补传 v2.0.7 的附件**（老链接也能用了）
+
+**② `install-online.sh` 加自动回退**
+
+```
+先试 Release 附件
+   ↓ 404
+改用仓库快照 codeload
+   ↓
+解压 → 找 dsh-tools-* 目录 → 跑 install.sh
+```
+
+**这样以后哪个版本忘了传附件，一键安装也不会死。**
+
+实测（正好赶上 v2.0.7 没附件）：
+
+```console
+🔍 查最新版本...
+   版本: v2.0.7
+⬇️  下载...
+⚠️  Release 附件拿不到（.../v2.0.7/dsh-tools-2.0.7.tar.gz）
+   改用仓库快照...
+📂 安装...
+
+📦 dsh-tools 2.0.7
+   ✅ /usr/local/bin/dsh-backup
+   ✅ /usr/local/bin/dsh-restore
+   ...（9 个全装上）
+```
+
+### 教训
+
+**发版是个多步流程，漏一步不会报错、只会静默少东西。**
+
+**以后发版后必须验证：**
+
+```bash
+curl -s https://api.github.com/repos/OWNER/REPO/releases/latest \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['tag_name'], [a['name'] for a in d['assets']])"
+```
+
+**附件列表为空就是漏了。**
+
 ## 2.0.7 — 2026-10-24
 
 **`dsh-doctor` 会把已经手工移出的会话又算一遍。**
