@@ -1,5 +1,87 @@
 # 更新日志
 
+## 2.0.6 — 2026-10-24
+
+**加了「空会话」检测 —— 这类会话会让应用报错，但之前工具看不见。**
+
+### 现象
+
+`dsh-doctor` 全绿：
+
+```console
+  seq 断档:   ✅ 0
+  帧布局:     ✅ 全部合法
+✅ 没发现「确定的问题」
+```
+
+但应用打开时仍报：
+
+```
+stored session "session-9f36469e-..." is corrupt:
+corrupt Zstandard session log: complete frame contains a torn JSONL record
+```
+
+### 原因
+
+这类会话是「**点开新对话、一句话没说就关了**」留下的：
+
+```
+session → permission/preset(0) → sandbox/mode(1) → approval/policy(2)
+```
+
+**4 行，没有对话，也没有 session/end-seed。**
+
+harness 读它时 `restore.decodeRow` 语义校验失败 → `committedBytes` 走不到末尾
+→ 报「torn JSONL record」。
+
+**内容本身是完整的**（帧对、JSON 能解析、seq 连续）——
+所以我的字节级检查一个都抓不到。
+
+### 改法
+
+新增判定：**既没有对话事件、也没有 `session/end-seed`** → 空会话。
+
+实测这条判定很准（13 个会话）：
+
+| 会话 | 对话 | end-seed | 判定 |
+| --- | --- | --- | --- |
+| 9441bf7c | 有 | 有 | ✅ |
+| 1aaf44ea | 无 | 无 | ⚠️ 空会话 |
+| 4c9a6fea | 无 | 有 | ✅ |
+| 9f36469e | 无 | 无 | ⚠️ 空会话 |
+| a1bae420 | 无 | 无 | ⚠️ 空会话 |
+| b62febf2 | 无 | 无 | ⚠️ 空会话 |
+| c1b8dce0 | 有 | 无 | ✅ |
+| fb1c1d2b | 无 | 有 | ✅ |
+
+**有对话的，即使没 end-seed 也没问题。**
+
+### 输出
+
+```console
+  空会话:     ⚠️  4 个（只有预设、没有对话、没正常结束）
+```
+
+并且**直接生成能复制执行的清理命令**（改名而不是删除，能反悔）：
+
+```console
+       处理：改名就等于让它们从列表消失，还能反悔。
+       先停 Web，再复制执行：
+
+         for d in \
+           "/root/.dsh/sessions/--root-deepseek-harness--/session-1aaf44ea-..." \
+           "/root/.dsh/sessions/--root-deepseek-harness--/session-9f36469e-..." \
+           ... \
+         ; do mv "$d" "$d.disabled"; done
+```
+
+### 局限
+
+**工具仍然无法 100% 复现 harness 的语义校验**（`decodeRow` 那些规则）。
+
+它现在能抓到的是「已知会导致失败的形态」。真遇到新的失败方式，
+还是只能靠应用报的错。
+
 ## 2.0.5 — 2026-10-24
 
 **`dsh-reindex` 的「Web 在跑」检测有两个 bug。**

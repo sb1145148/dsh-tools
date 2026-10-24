@@ -23,7 +23,7 @@
 # ============================================================
 set -u
 
-TOOLS_VERSION="2.0.3"
+TOOLS_VERSION="2.0.6"
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
 SESS="$DSH/sessions"
@@ -236,6 +236,29 @@ for path in sorted(glob.glob(os.path.join(root, '**', 'session.v*.jsonl.zstd'), 
     except Exception:
         print('UNREADABLE\t%s' % path)
         continue
+    # 空会话：只有预设、没有真正的对话，而且没有 session/end-seed。
+    # 这类会话是「点开新对话、一句话没说就关了」留下的。
+    # 实测应用读它们会报 torn JSONL record —— 因为 restore 解码失败，
+    # committedBytes 没走到末尾。内容本身没问题，是语义不完整。
+    types_seen = set()
+    has_talk = False
+    has_end = False
+    for _l in content.split(b'\n'):
+        if not _l.strip():
+            continue
+        try:
+            _d = json.loads(_l)
+        except Exception:
+            continue
+        _t = _d.get('type') or ''
+        types_seen.add(_t)
+        if _t in ('user/message', 'assistant/message'):
+            has_talk = True
+        if _t == 'session/end-seed':
+            has_end = True
+    if not has_talk and not has_end:
+        print('EMPTY\t%s\t%s' % (path, ','.join(sorted(types_seen))))
+
     prev = 0; gap = None
     for line in content.split(b'\n'):
         if not line.strip(): continue
@@ -255,16 +278,18 @@ fi
 
 NOZLIB=$(grep -c '^NOZLIB' "$T/issues" 2>/dev/null || true)
 LIVE_N=$(grep -c '^LIVE' "$T/issues" 2>/dev/null || true)
+EMPTY_N=$(grep -c '^EMPTY' "$T/issues" 2>/dev/null || true)
 FR_BAD=$(grep -c '^FRAMEBAD' "$T/issues" 2>/dev/null || true)
 UNREADABLE=$(grep -c '^UNREADABLE' "$T/issues" 2>/dev/null || true)
 GAPS=$(grep -c '^GAP' "$T/issues" 2>/dev/null || true)
 NC_TYPES=$(grep '^NONCORE' "$T/issues" 2>/dev/null | cut -f3 | sort -u | tr '\n' ' ' | sed 's/ $//')
 NC_COUNT=$(grep -c '^NONCORE' "$T/issues" 2>/dev/null || true)
 
-NOZLIB=${NOZLIB:-0}; FR_BAD=${FR_BAD:-0}; LIVE_N=${LIVE_N:-0}
+NOZLIB=${NOZLIB:-0}; FR_BAD=${FR_BAD:-0}; LIVE_N=${LIVE_N:-0}; EMPTY_N=${EMPTY_N:-0}
 UNREADABLE=${UNREADABLE:-0}; GAPS=${GAPS:-0}; NC_COUNT=${NC_COUNT:-0}
 case "$FR_BAD" in *[!0-9]*|"") FR_BAD=0;; esac
 case "$LIVE_N" in *[!0-9]*|"") LIVE_N=0;; esac
+case "$EMPTY_N" in *[!0-9]*|"") EMPTY_N=0;; esac
 case "$UNREADABLE" in *[!0-9]*|"") UNREADABLE=0;; esac
 case "$GAPS" in *[!0-9]*|"") GAPS=0;; esac
 case "$NC_COUNT" in *[!0-9]*|"") NC_COUNT=0;; esac
@@ -330,6 +355,9 @@ fi
 if [ "$LIVE_N" -gt 0 ]; then
   say "  正在写入:   $LIVE_N 个（120 秒内改过，已跳过判定）"
 fi
+if [ "$EMPTY_N" -gt 0 ]; then
+  say "  空会话:     ⚠️  $EMPTY_N 个（只有预设、没有对话、没正常结束）"
+fi
 case "$EVENTS_SOURCE" in
   harness)  say "  事件表:     取自已安装的 harness（$(printf '%s' "$KNOWN_EVENTS" | wc -w) 种）" ;;
   fallback) say "  事件表:     ⚠️  读不到 harness，用的是内置参考列表"
@@ -363,7 +391,7 @@ else
   say "  最近备份:   ✅ $BK_AGE 天前  $(basename "$LAST_BK")"
 fi
 
-TOTAL_PROB=$((UNREADABLE + GAPS + FR_BAD))
+TOTAL_PROB=$((UNREADABLE + GAPS + FR_BAD + EMPTY_N))
 say ""
 say "──────────────────────────────────────"
 # 注意：指定了 --strip-type 就不能在这里退出 ——
@@ -389,6 +417,27 @@ say ""
 if [ "$UNREADABLE" -gt 0 ]; then
   say "  ❌ 读不了的文件（工具帮不上，需要看具体报错）:"
   grep '^UNREADABLE' "$T/issues" | cut -f2 | sed "s|$SESS/|     |" | head -5
+  say ""
+fi
+if [ "$EMPTY_N" -gt 0 ]; then
+  say "  ⚠️  空会话（只有预设、没有对话、没正常结束）:"
+  grep '^EMPTY' "$T/issues" | cut -f2 | sed "s|$SESS/|     |" | head -8
+  say ""
+  say "     这些是「点开新对话、一句话没说就关了」留下的。"
+  say "     应用读它们可能报 corrupt / torn JSONL record —— 内容本身没问题，"
+  say "     只是语义不完整（缺 session/end-seed）。"
+  say ""
+  say "     处理：改名就等于让它们从列表消失，还能反悔。"
+  say "     先停 Web，再复制执行："
+  say ""
+  say "       for d in \\"
+  # 逐个列出会话目录（不含文件名），拼成能直接粘的命令
+  grep '^EMPTY' "$T/issues" | cut -f2 | sed 's|/session\.v[0-9]*\.jsonl\.zstd$||' | while IFS= read -r d; do
+    say "         \"$d\" \\"
+  done
+  say "       ; do mv \"\$d\" \"\$d.disabled\"; done"
+  say ""
+  say "     （也可以直接忽略 —— 它们不占地方，只是每次会弹一个错误）"
   say ""
 fi
 if [ "$FR_BAD" -gt 0 ]; then
