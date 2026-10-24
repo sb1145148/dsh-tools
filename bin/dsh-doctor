@@ -23,7 +23,7 @@
 # ============================================================
 set -u
 
-TOOLS_VERSION="2.0.1"
+TOOLS_VERSION="2.0.3"
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
 SESS="$DSH/sessions"
@@ -167,7 +167,7 @@ if [ "$N_SESS" -gt 0 ]; then
   # 一次 Python 调用读完所有会话（用 libzstd，不依赖 zstd 命令）。
   # 输出: UNREADABLE / GAP / NONCORE / FRAMEBAD
   KNOWN_EVENTS="$KNOWN_EVENTS" python3 - "$SESS" <<'PY' >> "$T/issues"
-import ctypes, ctypes.util, glob, json, os, sys
+import ctypes, ctypes.util, glob, json, os, sys, time
 
 def load():
     for c in [ctypes.util.find_library('zstd'),
@@ -212,7 +212,18 @@ def dec(data):
 
 root = sys.argv[1]
 known = set(os.environ['KNOWN_EVENTS'].split())
+LIVE_WINDOW = 120.0   # 秒。这之内被改过的文件，很可能正在被写入
+now = time.time()
+
 for path in sorted(glob.glob(os.path.join(root, '**', 'session.v*.jsonl.zstd'), recursive=True)):
+    # 正在写入的会话不要判它「断档 / 撕裂」——
+    # 读到一半时最后那个帧本来就只有半条记录，是正常的进行态。
+    try:
+        if now - os.path.getmtime(path) < LIVE_WINDOW:
+            print('LIVE\t%s' % path)
+            continue
+    except OSError:
+        pass
     try:
         buf = open(path, 'rb').read()
         fr = frames(buf)
@@ -243,15 +254,17 @@ PY
 fi
 
 NOZLIB=$(grep -c '^NOZLIB' "$T/issues" 2>/dev/null || true)
+LIVE_N=$(grep -c '^LIVE' "$T/issues" 2>/dev/null || true)
 FR_BAD=$(grep -c '^FRAMEBAD' "$T/issues" 2>/dev/null || true)
 UNREADABLE=$(grep -c '^UNREADABLE' "$T/issues" 2>/dev/null || true)
 GAPS=$(grep -c '^GAP' "$T/issues" 2>/dev/null || true)
 NC_TYPES=$(grep '^NONCORE' "$T/issues" 2>/dev/null | cut -f3 | sort -u | tr '\n' ' ' | sed 's/ $//')
 NC_COUNT=$(grep -c '^NONCORE' "$T/issues" 2>/dev/null || true)
 
-NOZLIB=${NOZLIB:-0}; FR_BAD=${FR_BAD:-0}
+NOZLIB=${NOZLIB:-0}; FR_BAD=${FR_BAD:-0}; LIVE_N=${LIVE_N:-0}
 UNREADABLE=${UNREADABLE:-0}; GAPS=${GAPS:-0}; NC_COUNT=${NC_COUNT:-0}
 case "$FR_BAD" in *[!0-9]*|"") FR_BAD=0;; esac
+case "$LIVE_N" in *[!0-9]*|"") LIVE_N=0;; esac
 case "$UNREADABLE" in *[!0-9]*|"") UNREADABLE=0;; esac
 case "$GAPS" in *[!0-9]*|"") GAPS=0;; esac
 case "$NC_COUNT" in *[!0-9]*|"") NC_COUNT=0;; esac
@@ -313,6 +326,9 @@ elif [ "$FR_BAD" -gt 0 ]; then
   say "              修: dsh-reframe --fix"
 else
   say "  帧布局:     ✅ 全部合法"
+fi
+if [ "$LIVE_N" -gt 0 ]; then
+  say "  正在写入:   $LIVE_N 个（120 秒内改过，已跳过判定）"
 fi
 case "$EVENTS_SOURCE" in
   harness)  say "  事件表:     取自已安装的 harness（$(printf '%s' "$KNOWN_EVENTS" | wc -w) 种）" ;;
