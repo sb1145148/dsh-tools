@@ -9,8 +9,6 @@ dsh-restore <包>    # 还原
 
 [English](README.en.md) · 中文
 
-![dsh-backup 演示](docs/backup-demo.png)
-
 ---
 
 ## 🚀 最快用法（不用懂任何命令）
@@ -41,7 +39,7 @@ dsh-restore <包>    # 还原
 
 ## 📥 我下载好了，然后呢
 
-如果你拿到的是 `dsh-tools-1.0.2.tar.gz`，**最省事的办法还是把上面那段发给 AI**，
+如果你拿到的是一个 `dsh-tools-x.y.z.tar.gz`，**最省事的办法还是把上面那段发给 AI**，
 它会帮你解压安装，你不用管路径。
 
 ---
@@ -75,7 +73,7 @@ cd dsh-tools && sh install.sh
 **你会看到：**
 
 ```
-📦 dsh-tools 1.0.1
+📦 dsh-tools 2.1.0
    安装到: /usr/local/bin
    ✅ /usr/local/bin/dsh-backup
    ✅ /usr/local/bin/dsh-restore
@@ -128,7 +126,6 @@ dsh-backup
                               ⑤ 重启 Web
 ```
 
-#![dsh-restore 演示](docs/restore-demo.png)
 
 ### ⚠️ 最容易做错的一步
 
@@ -196,7 +193,7 @@ ls ~/.dsh/sessions/
 
 ### 还原之后，我之前修过的东西怎么回退了
 
-**dsh-restore 默认不覆盖比备份新的文件** —— 从 1.1.3 开始。
+**dsh-restore 默认不覆盖比备份新的文件。**
 
 如果你用的是旧版本，或者就是想强制覆盖：加 `--force`。
 
@@ -647,6 +644,76 @@ DSHA 自带的「备份与恢复」目前有个 bug：
 
 ---
 
+## 🧰 九件工具
+
+| 命令 | 干什么 |
+| --- | --- |
+| `dsh-backup` | 备份到 `/sdcard/Download/dsh-backup/` |
+| `dsh-restore` | 还原（不覆盖比备份新的文件） |
+| `dsh-doctor` | 一体检：帧布局 / seq / 索引 / 事件类型 / 备份新鲜度 |
+| `dsh-reframe` | 修帧布局（首帧必须恰好一行） |
+| `dsh-repair` | 修 seq 断档 |
+| `dsh-strip` | 给事件打 `ignorable` 标记（`--mark`，推荐）或剥离 |
+| `dsh-recover` | 用备份原件救回被改坏的会话 |
+| `dsh-reindex` | 对齐 `workspace.json` 的会话索引 |
+| `dsh-events` | 列出当前 harness 认识哪些事件类型 |
+
+**日常只用两个：**
+
+```bash
+dsh-backup     # 备份
+dsh-doctor     # 体检
+```
+
+---
+
+## 🚨 铁律：不要改会话目录名
+
+**`~/.dsh/sessions/` 下面的路径是结构性信息，不是随便起的名字。**
+
+```
+sessions/
+  --root-deepseek-harness--/        ← 由会话 header 的 cwd 推出来
+    session-1aaf44ea-.../           ← 由 header 的 id 推出来
+      session.v4.jsonl.zstd
+```
+
+**harness 会用 header 里的 `id` + `cwd` 反推「这个会话应该在的路径」，
+再和实际路径比对。对不上就判 `corrupt`，然后——**
+
+```
+WorkspaceRegistry 加载失败
+   ↓
+WorkspaceController / SessionController 全部 pending
+   ↓
+对话列表空掉、打开文件夹也失败
+```
+
+**实测复现过。比原来的问题严重得多。**
+
+**想「移出」某个会话，就搬到 `sessions/` 外面：**
+
+```bash
+mkdir -p /root/.dsh/_quarantine
+mv "/root/.dsh/sessions/--root-deepseek-harness--/session-xxx" /root/.dsh/_quarantine/
+```
+
+**不要 `mv xxx xxx.disabled`。**
+
+---
+
+## ✅ 版本降级不可行
+
+- 日志**只往前兼容**。旧版读新版写的日志 → `unknown event` 或静默跳过
+- 旧版写回去的是**旧格式**，新版再读又坏
+- 来回折腾只会让数据越来越乱
+
+**正确做法：升到写这份日志的版本。**
+
+`dsh-strip` 只用来处理「某个已知类型把日志卡住」，**不是降级手段**。
+
+---
+
 ## 🔧 命令行速查（给懂的人）
 
 ```bash
@@ -674,6 +741,30 @@ dsh-restore xxx.tar.gz --all
 # 回滚插件
 rm -rf ~/.dsh/plugin-src
 mv ~/.dsh/plugin-src.before-restore ~/.dsh/plugin-src
+
+# 体检
+dsh-doctor
+dsh-doctor --fix --strip-type <类型>
+
+# 修帧布局（首帧必须一行）
+dsh-reframe
+dsh-reframe --fix
+dsh-reframe --rollback
+
+# 修 seq 断档
+dsh-repair --check
+dsh-repair
+
+# 给事件打 ignorable 标记（推荐）
+dsh-strip --mark <文件> <类型>
+
+# 救回被改坏的会话
+dsh-recover
+dsh-recover --fix
+
+# 对齐工作区索引
+dsh-reindex
+dsh-reindex --fix
 ```
 
 **带走：**

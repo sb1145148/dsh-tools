@@ -9,8 +9,6 @@ dsh-restore <file>  # restore
 
 [中文说明](README.md)
 
-![dsh-backup demo](docs/backup-demo.png)
-
 ---
 
 ## 🚀 Quick start (no commands needed)
@@ -350,6 +348,68 @@ them, so the whole restore fails.
 **Which makes phone-to-phone migration impossible.**
 
 This tool strips those links at **packaging time**, so the restore goes through.
+
+---
+
+## 🚨 Never rename a session directory
+
+The paths under `~/.dsh/sessions/` are **structural**, not arbitrary names:
+
+```
+sessions/
+  --root-deepseek-harness--/      ← derived from the session header's cwd
+    session-1aaf44ea-.../         ← derived from the header's id
+      session.v4.jsonl.zstd
+```
+
+The harness **derives the expected path from the header's `id` + `cwd`** and compares
+it with the actual path. If they don't match it declares the session corrupt, and then:
+
+```
+WorkspaceRegistry fails to load
+   ↓
+WorkspaceController / SessionController all pending
+   ↓
+Conversation list goes empty, "open folder" fails too
+```
+
+This is reproduced and verified. **It is much worse than the original problem.**
+
+To "remove" a session, **move it out of `sessions/`** — do not rename it in place:
+
+```bash
+mkdir -p /root/.dsh/_quarantine
+mv "/root/.dsh/sessions/--root-deepseek-harness--/session-xxx" /root/.dsh/_quarantine/
+```
+
+## ❌ Downgrading is not viable
+
+Logs are **forward-compatible only**. An older build can't read what a newer one wrote
+(`unknown event` or a silent skip), and it writes back the old shape, which the newer
+build then rejects. Back and forth makes things worse.
+
+**Upgrade to the build that wrote the log.**
+
+## 🧰 The nine tools
+
+| Command | What it does |
+| --- | --- |
+| `dsh-backup` | Back up to `/sdcard/Download/dsh-backup/` |
+| `dsh-restore` | Restore (never overwrites files newer than the backup) |
+| `dsh-doctor` | One-shot check: frame layout / seq / index / event types / backup age |
+| `dsh-reframe` | Fix frame layout (first frame must be exactly one line) |
+| `dsh-repair` | Fix seq gaps |
+| `dsh-strip` | Mark events `ignorable` (`--mark`, recommended) or strip them |
+| `dsh-recover` | Recover a damaged session from a clean backup copy |
+| `dsh-reindex` | Align `workspace.json`'s session index with disk |
+| `dsh-events` | List the event types the installed harness knows |
+
+Day to day you only need two:
+
+```bash
+dsh-backup     # back up
+dsh-doctor     # check
+```
 
 ---
 
