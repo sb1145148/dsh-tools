@@ -1,5 +1,74 @@
 # 更新日志
 
+## 2.0.2 — 2026-10-24
+
+**`dsh-repair` 是最后一个还在依赖 `zstd` 命令、并且还在写单帧的工具。**
+
+### 问题
+
+```sh
+command -v zstd >/dev/null 2>&1 || die "需要 zstd。先装: apt-get install -y zstd"
+...
+' 2>"$tmp.stat" | zstd -q -f -o "$tmp" -
+```
+
+两件事同时错：
+
+1. **要求 `zstd` 命令**，而它在有的环境里装不上
+   （`apt-get install zstd` → `E: Unable to locate package zstd`）
+2. **`zstd -o` 只出一个帧** → 会话被判损坏、静默跳过
+
+### 改法
+
+整个重写成 Python（`libzstd` + ctypes）：
+
+- 不再需要 `zstd` 命令
+- 写回时首帧只装 header 行、正文另起一帧
+- 自检：解回来必须一致、首帧必须一行，否则不动原文件
+- 顺带识别「帧布局不对」，不只是 seq 断档
+
+实测：
+
+```console
+$ dsh-repair --check
+  ⚠️  s1   1 处断档
+      首个断点: seq 7 → 108
+
+$ dsh-repair
+      ✅ 修好：1 处断档，100 个 seq 前移（原件存为 .before-repair）
+
+验证：11 条事件全保留  seq 1..11 连续  2 帧 首帧一行 ✅
+```
+
+### `dsh-backup` 也去掉了 `zstd` 依赖
+
+`--check` 里的事件类型检查和 seq 检查改用 `libzstd`。
+
+### 全量审计结果
+
+| 工具 | 依赖 zstd 命令 |
+| --- | --- |
+| `dsh-backup` | ✅ 不依赖 |
+| `dsh-restore` | ✅ |
+| `dsh-repair` | ✅ |
+| `dsh-strip` | ✅ |
+| `dsh-reframe` | ✅ |
+| `dsh-doctor` | ✅ |
+| `dsh-events` | ✅ |
+| `dsh-recover` | ✅ |
+| `dsh-reindex` | ✅ |
+
+**9 个工具全部只依赖 `python3` + `libzstd`。**
+
+### 如果你之前被卡住
+
+```bash
+# 不用再装 zstd，直接升工具
+dsh-install        # 或者用 release 包重装
+```
+
+装完 `dsh-repair` 就能跑了。
+
 ## 2.0.1 — 2026-10-24
 
 **审查仓库里另外两个工具的切帧逻辑，修了两处。**

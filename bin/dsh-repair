@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env python3
 # ============================================================
 #  dsh-repair —— 修会话日志的 seq 断档
 #
@@ -7,149 +7,343 @@
 #    invalid committed event at line N: released v2 row M
 #    has seq gap (expected M, got K)
 #
-#  原因：会话日志里的 seq 不连续。常见于「恢复会话」时
-#  seq 计数器跳了，中间一段写去了别处。
+#  原因：会话日志里的 seq 不连续。常见于「恢复会话」时 seq 计数器
+#  跳了，中间一段写去了别处。
 #
-#  做法：把断点之后的 seq 整体前移，让它重新连续。
-#  内容一行不丢，只是重新编号。
+#  做法：把断点之后的 seq 整体前移，让它重新连续。内容一行不丢，
+#  只是重新编号。
+#
+#  ⚠️ 写回时必须切对帧：
+#     DSH 的读取器要求**首帧恰好一行**（assertZstdHeaderFrame）。
+#     整份压成一个帧会被判损坏并静默跳过 —— 文件在、界面没有、
+#     也不报错。
+#     早期版本这里用 `zstd -q -f -o` 重压，写出来就是单帧，
+#     把好文件写坏过。现在改成首帧只装 header 行、正文另起一帧。
+#
+#  ⚠️ 优先考虑 dsh-recover：
+#     如果只是「某个事件类型不认识」，用 `dsh-strip --mark` 打
+#     ignorable 标记就好 —— 不删行、不动 seq，最安全。
+#     dsh-repair 是给真正的 seq 断裂用的。
 #
 #  用法:
-#    dsh-repair                 # 修所有会话（有断档的才动）
-#    dsh-repair <session 目录>   # 修指定的
-#    dsh-repair --check         # 只检查，不改
+#    dsh-repair                修所有会话（有断档的才动）
+#    dsh-repair <session 目录>  修指定的
+#    dsh-repair --check        只检查，不改
+#    dsh-repair --rollback     回退（*.before-repair）
+#
+#  依赖：python3 + libzstd（不需要 zstd 命令）
 # ============================================================
-set -u
+import ctypes
+import ctypes.util
+import glob
+import json
+import os
+import shutil
+import sys
 
-HOME_DIR="${HOME:-/root}"
-SESS_ROOT="$HOME_DIR/.dsh/sessions"
-MODE="fix"
-TARGET=""
+VERSION = "2.0.2"
+BAK = '.before-repair'
 
-# 选项和路径可以任意顺序出现
-for arg in "$@"; do
-  case "$arg" in
-    -h|--help) MODE="help" ;;
-    --check)   MODE="check" ;;
-    *)         [ -z "$TARGET" ] && TARGET="$arg" ;;
-  esac
-done
 
-say() { printf '%s\n' "$*"; }
-die() { printf '❌ %s\n' "$*" >&2; exit 1; }
+def _load_lib():
+    for c in [ctypes.util.find_library('zstd'),
+              '/lib/aarch64-linux-gnu/libzstd.so.1',
+              '/usr/lib/aarch64-linux-gnu/libzstd.so.1',
+              '/lib/x86_64-linux-gnu/libzstd.so.1',
+              '/usr/lib/x86_64-linux-gnu/libzstd.so.1',
+              'libzstd.so.1']:
+        if not c:
+            continue
+        try:
+            return ctypes.CDLL(c)
+        except OSError:
+            continue
+    raise RuntimeError('找不到 libzstd')
 
-if [ "$MODE" = "help" ]; then
-  cat <<'HLP'
-用法: dsh-repair [选项] [session 目录]
 
-  修会话日志的 seq 断档（应用报 "seq gap" 时用）。
+lib = _load_lib()
+lib.ZSTD_findFrameCompressedSize.restype = ctypes.c_size_t
+lib.ZSTD_findFrameCompressedSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_decompress.restype = ctypes.c_size_t
+lib.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
+lib.ZSTD_getFrameContentSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_compress.restype = ctypes.c_size_t
+lib.ZSTD_compress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+lib.ZSTD_compressBound.restype = ctypes.c_size_t
+lib.ZSTD_compressBound.argtypes = [ctypes.c_size_t]
+lib.ZSTD_isError.restype = ctypes.c_uint
+lib.ZSTD_isError.argtypes = [ctypes.c_size_t]
+lib.ZSTD_getErrorName.restype = ctypes.c_char_p
+lib.ZSTD_getErrorName.argtypes = [ctypes.c_size_t]
 
-  --check    只检查，不改文件
-  (无参数)   检查并修复所有会话
 
-需要 zstd。没装的话先: apt-get install -y zstd
-HLP
-  exit 0
-fi
+def _err(rc):
+    return lib.ZSTD_getErrorName(rc).decode()
 
-command -v zstd >/dev/null 2>&1 || die "需要 zstd。先装: apt-get install -y zstd"
 
-check_one() {
-  f="$1"
-  zstd -dc "$f" 2>/dev/null | python3 -c "
-import sys, json
-rows = 0; prev = None; gaps = []
-for raw in sys.stdin.buffer:
-    if not raw.strip(): continue
-    try: o = json.loads(raw)
-    except Exception: continue
-    rows += 1
-    s = o.get('seq')
-    if s is None: continue
-    if prev is not None and s != prev + 1:
-        gaps.append((prev, s))
-    prev = s
-print(json.dumps({'rows': rows, 'gaps': gaps}))
-"
-}
+def split_frames(buf):
+    out, off, n = [], 0, len(buf)
+    while off < n:
+        sz = lib.ZSTD_findFrameCompressedSize(buf[off:], n - off)
+        if lib.ZSTD_isError(sz) or sz == 0:
+            break
+        out.append((off, sz))
+        off += sz
+    return out
 
-fix_one() {
-  f="$1"
-  tmp=$(mktemp "${TMPDIR:-/tmp}/dsh-repair.XXXXXX") || return 1
-  if zstd -dc "$f" 2>/dev/null | python3 -c '
-import sys, json
-rows = [json.loads(r) for r in sys.stdin.buffer if r.strip()]
-prev_raw = None; shift = 0; breaks = 0
-cuts = []
-for r in rows:
-    s = r.get("seq")
-    if s is None: continue
-    if prev_raw is not None and s != prev_raw + 1:
-        shift += s - (prev_raw + 1); breaks += 1; cuts.append(s)
-    prev_raw = s
-if breaks:
-    prev_raw = None; shift = 0
+
+def decompress_frame(data):
+    csz = lib.ZSTD_getFrameContentSize(data, len(data))
+    cap = csz if csz < (1 << 60) else len(data) * 200 + 65536
+    dst = ctypes.create_string_buffer(cap)
+    r = lib.ZSTD_decompress(dst, cap, data, len(data))
+    if lib.ZSTD_isError(r):
+        raise RuntimeError('解压失败: %s' % _err(r))
+    return dst.raw[:r]
+
+
+def compress_frame(data, level=19):
+    cap = lib.ZSTD_compressBound(len(data))
+    dst = ctypes.create_string_buffer(cap)
+    r = lib.ZSTD_compress(dst, cap, data, len(data), level)
+    if lib.ZSTD_isError(r):
+        raise RuntimeError('压缩失败: %s' % _err(r))
+    return dst.raw[:r]
+
+
+def read_all(path):
+    buf = open(path, 'rb').read()
+    return b''.join(decompress_frame(buf[o:o + s]) for o, s in split_frames(buf))
+
+
+def write_session(path, content):
+    """首帧只装 header 行，正文一帧 —— DSH 读取器要求的布局。"""
+    nl = content.find(b'\n')
+    if nl < 0:
+        raise RuntimeError('内容里没有换行，不是合法会话日志')
+    head, rest = content[:nl + 1], content[nl + 1:]
+    data = compress_frame(head) + (compress_frame(rest) if rest else b'')
+    with open(path, 'wb') as fh:
+        fh.write(data)
+    return len(data)
+
+
+def first_frame_ok(path):
+    buf = open(path, 'rb').read()
+    fr = split_frames(buf)
+    if not fr:
+        return False
+    first = decompress_frame(buf[fr[0][0]:fr[0][0] + fr[0][1]])
+    return len(first) > 0 and first.count(b'\n') == 1 and first.endswith(b'\n')
+
+
+def parse_rows(content):
+    rows = []
+    bad = 0
+    for line in content.split(b'\n'):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            bad += 1
+    return rows, bad
+
+
+def find_gaps(rows):
+    prev = None
+    gaps = []
     for r in rows:
-        s = r.get("seq")
-        if s is None: continue
+        s = r.get('seq')
+        if not isinstance(s, int):
+            continue
+        if prev is not None and s != prev + 1:
+            gaps.append((prev, s))
+        prev = s
+    return gaps
+
+
+def repair_rows(rows):
+    """把断点之后的 seq 整体前移。返回 (新 rows, 断点数, 前移总量)。"""
+    cuts = []
+    prev_raw = None
+    shift = 0
+    breaks = 0
+    for r in rows:
+        s = r.get('seq')
+        if not isinstance(s, int):
+            continue
+        if prev_raw is not None and s != prev_raw + 1:
+            shift += s - (prev_raw + 1)
+            breaks += 1
+            cuts.append(s)
+        prev_raw = s
+
+    if not breaks:
+        return rows, 0, 0
+
+    prev_raw = None
+    shift = 0
+    for r in rows:
+        s = r.get('seq')
+        if not isinstance(s, int):
+            continue
         if prev_raw is not None and s != prev_raw + 1:
             shift += s - (prev_raw + 1)
         if shift:
-            r["seq"] = s - shift
-            if r.get("sourceEventSeqs"):
-                r["sourceEventSeqs"] = [(x - shift) if any(x >= c for c in cuts) else x for x in r["sourceEventSeqs"]]
+            r['seq'] = s - shift
+            src = r.get('sourceEventSeqs')
+            if isinstance(src, list):
+                r['sourceEventSeqs'] = [
+                    (x - shift) if any(x >= c for c in cuts) else x for x in src
+                ]
         prev_raw = s
-sys.stderr.write(f"{breaks} {shift}\n")
-for r in rows:
-    sys.stdout.write(json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n")
-' 2>"$tmp.stat" | zstd -q -f -o "$tmp" -; then
-    read -r breaks shift < "$tmp.stat" 2>/dev/null || { breaks=0; shift=0; }
-    if [ "${breaks:-0}" -gt 0 ]; then
-      cp -a "$f" "$f.before-repair"
-      mv "$tmp" "$f"
-      chmod 600 "$f"
-      say "  ✅ 修好：${breaks} 处断档，${shift} 个 seq 前移（原文件存为 .before-repair）"
-    else
-      rm -f "$tmp"
-      say "  ⏭  没有断档"
-    fi
-  else
-    rm -f "$tmp"
-    say "  ❌ 处理失败"
-  fi
-}
+    return rows, breaks, shift
 
-# ---- 收集目标 ----
-if [ -n "$TARGET" ]; then
-  [ -d "$TARGET" ] || die "找不到目录: $TARGET"
-  SET=$(find "$TARGET" -name "session.v4.jsonl.zstd" 2>/dev/null)
-else
-  [ -d "$SESS_ROOT" ] || die "找不到 $SESS_ROOT"
-  SET=$(find "$SESS_ROOT" -name "session.v4.jsonl.zstd" 2>/dev/null)
-fi
 
-[ -n "$SET" ] || die "没找到任何会话文件"
+def main():
+    args = sys.argv[1:]
+    mode = 'fix'
+    target = ''
 
-say "🔍 扫描会话..."
-echo "$SET" | while IFS= read -r f; do
-  name=$(basename "$(dirname "$f")")
-  res=$(check_one "$f")
-  rows=$(printf '%s' "$res" | python3 -c "import json,sys;print(json.load(sys.stdin)['rows'])" 2>/dev/null || echo 0)
-  ngap=$(printf '%s' "$res" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['gaps']))" 2>/dev/null || echo 0)
-  if [ "$ngap" -gt 0 ]; then
-    printf '  ⚠️  %s  %s 行，%s 处断档\n' "$name" "$rows" "$ngap"
-    printf '%s' "$res" | python3 -c "
-import json,sys
-for a,b in json.load(sys.stdin)['gaps'][:3]:
-    print(f'        seq {a} → {b}（断了 {b-a-1}）')
-" 2>/dev/null
-    if [ "$MODE" = "fix" ]; then
-      fix_one "$f"
-    fi
-  else
-    printf '  ✅ %s  %s 行，连续\n' "$name" "$rows"
-  fi
-done
+    for a in args:
+        if a in ('-h', '--help'):
+            for line in open(__file__, encoding='utf-8'):
+                if line.startswith('#!'):
+                    continue
+                if not line.startswith('#'):
+                    break
+                print(line.rstrip().lstrip('#').strip())
+            return 0
+        elif a == '--check':
+            mode = 'check'
+        elif a == '--rollback':
+            mode = 'rollback'
+        elif a.startswith('-'):
+            print('❌ 不认识的选项: %s' % a, file=sys.stderr)
+            return 1
+        elif not target:
+            target = a
 
-say ""
-say "完成。"
-[ "$MODE" = "check" ] && say "（--check 模式，没有改动任何文件）"
+    home = os.path.expanduser('~')
+    root = os.path.join(home, '.dsh', 'sessions')
+
+    if mode == 'rollback':
+        n = 0
+        for p in glob.glob(os.path.join(root, '**', '*' + BAK), recursive=True):
+            dst = p[:-len(BAK)]
+            shutil.copy2(p, dst)
+            print('  ↩︎  %s' % os.path.relpath(dst, root))
+            n += 1
+        print('✅ 回退 %d 个' % n)
+        return 0
+
+    if target:
+        if target.endswith('.zstd'):
+            files = [target]
+        else:
+            files = sorted(glob.glob(os.path.join(target, 'session.v*.jsonl.zstd')))
+    else:
+        files = sorted(glob.glob(os.path.join(root, '**', 'session.v*.jsonl.zstd'), recursive=True))
+
+    if not files:
+        print('没有找到会话文件')
+        return 0
+
+    print('🔍 检查 %d 个会话...' % len(files))
+    print()
+
+    fixed = 0
+    bad = 0
+    for p in files:
+        name = os.path.basename(os.path.dirname(p))[:44]
+        try:
+            content = read_all(p)
+        except Exception as e:
+            print('  ❌ %-46s 读不了: %s' % (name, e))
+            bad += 1
+            continue
+
+        rows, parse_bad = parse_rows(content)
+        gaps = find_gaps(rows)
+        frame_ok = first_frame_ok(p)
+
+        state = []
+        if gaps:
+            state.append('%d 处断档' % len(gaps))
+        if not frame_ok:
+            state.append('帧布局不对')
+        if parse_bad:
+            state.append('%d 行解析失败' % parse_bad)
+
+        if not state:
+            print('  ✅ %-46s %d 行，连续' % (name, len(rows)))
+            continue
+
+        print('  ⚠️  %-46s %s' % (name, '，'.join(state)))
+        if gaps:
+            print('      首个断点: seq %d → %d' % gaps[0])
+
+        if mode == 'check':
+            if gaps:
+                bad += 1
+            continue
+
+        new_rows, breaks, shift = repair_rows(rows)
+        body = ('\n'.join(json.dumps(r, ensure_ascii=False, separators=(',', ':'))
+                          for r in new_rows) + '\n').encode()
+
+        if not os.path.exists(p + BAK):
+            shutil.copy2(p, p + BAK)
+
+        tmp = p + '.repairing'
+        try:
+            write_session(tmp, body)
+            if read_all(tmp) != body:
+                os.unlink(tmp)
+                print('      ❌ 自检失败（解回来不一致），未改动')
+                bad += 1
+                continue
+            if not first_frame_ok(tmp):
+                os.unlink(tmp)
+                print('      ❌ 自检失败（首帧不是一行），未改动')
+                bad += 1
+                continue
+            os.replace(tmp, p)
+            os.chmod(p, 0o600)
+        except Exception as e:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            print('      ❌ 写入失败: %s' % e)
+            bad += 1
+            continue
+
+        after = parse_rows(read_all(p))[0]
+        left = find_gaps(after)
+        if left:
+            print('      ⚠️  修完还有 %d 处断档' % len(left))
+            bad += 1
+        else:
+            print('      ✅ 修好：%d 处断档，%d 个 seq 前移（原件存为 %s）'
+                  % (breaks, shift, BAK))
+            fixed += 1
+
+    print()
+    if mode == 'check':
+        print('✅ 全部连续' if bad == 0 else '⚠️  %d 个有问题（用 dsh-repair 修）' % bad)
+        return 0 if bad == 0 else 1
+
+    print('✅ 修好 %d 个' % fixed)
+    if bad:
+        print('⚠️  还有 %d 个没修好' % bad)
+    print()
+    print('回退: dsh-repair --rollback')
+    return 0 if bad == 0 else 1
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

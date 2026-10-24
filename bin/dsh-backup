@@ -19,6 +19,50 @@ OUT="$OUT_DIR/dsh-backup-$STAMP.tar.gz"
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/dsh-backup.XXXXXX")
 ROOT="$STAGE/dsh-backup-$STAMP"
 
+
+# ============================================================
+#  解压会话文件 —— 用 libzstd，不依赖 zstd 命令
+#  （这个环境里 zstd 命令不一定在；libzstd.so 一定有）
+# ============================================================
+zdecompress() {
+  python3 - "$1" <<'PY2' 2>/dev/null
+import ctypes, ctypes.util, sys
+for c in [ctypes.util.find_library('zstd'),
+          '/lib/aarch64-linux-gnu/libzstd.so.1',
+          '/usr/lib/aarch64-linux-gnu/libzstd.so.1',
+          '/lib/x86_64-linux-gnu/libzstd.so.1',
+          '/usr/lib/x86_64-linux-gnu/libzstd.so.1', 'libzstd.so.1']:
+    if not c: continue
+    try:
+        lib = ctypes.CDLL(c); break
+    except OSError: continue
+else:
+    sys.exit(1)
+lib.ZSTD_findFrameCompressedSize.restype = ctypes.c_size_t
+lib.ZSTD_findFrameCompressedSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_decompress.restype = ctypes.c_size_t
+lib.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
+lib.ZSTD_getFrameContentSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_isError.restype = ctypes.c_uint
+lib.ZSTD_isError.argtypes = [ctypes.c_size_t]
+buf = open(sys.argv[1], 'rb').read()
+o, n = 0, len(buf)
+parts = []
+while o < n:
+    s = lib.ZSTD_findFrameCompressedSize(buf[o:], n - o)
+    if lib.ZSTD_isError(s) or s == 0: break
+    csz = lib.ZSTD_getFrameContentSize(buf[o:o+s], s)
+    cap = csz if csz < (1 << 60) else s * 200 + 65536
+    dst = ctypes.create_string_buffer(cap)
+    r = lib.ZSTD_decompress(dst, cap, buf[o:o+s], s)
+    if lib.ZSTD_isError(r): sys.exit(1)
+    parts.append(dst.raw[:r])
+    o += s
+sys.stdout.buffer.write(b''.join(parts))
+PY2
+}
+
 TOOLS_VERSION="1.2.0"
 
 say() { printf '%s\n' "$*"; }
@@ -112,10 +156,10 @@ if [ "${1:-}" = "--check" ]; then
                 -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
   if [ -z "$LATEST_SESS" ]; then
     say "                 没有会话文件可查"
-  elif ! command -v zstd >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  elif ! command -v python3 >/dev/null 2>&1; then
     say "                 跳过（需要 zstd 和 python3）"
   else
-    UNK=$(KNOWN_EVENTS="$KNOWN_EVENTS" zstd -dc "$LATEST_SESS" 2>/dev/null | \
+    UNK=$(zdecompress "$LATEST_SESS" 2>/dev/null | \
       KNOWN_EVENTS="$KNOWN_EVENTS" python3 -c '
 import json, os, sys, collections
 known = set(os.environ["KNOWN_EVENTS"].split())
@@ -264,14 +308,14 @@ rm -f "$ROOT"/config/*.log 2>/dev/null
 # 备份时顺手查一遍，比等用户打开会话才炸要好。
 # 没有 zstd 就跳过（不装 zstd 也能正常备份，只是查不了）。
 say "🩺 检查会话连续性..."
-if command -v zstd >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1; then
   GAPLOG="$STAGE/gaps.log"
   : > "$GAPLOG"
   SESSCOUNT=0
   for f in "$ROOT"/sessions/*/*/session.v4.jsonl.zstd; do
     [ -f "$f" ] || continue
     SESSCOUNT=$((SESSCOUNT + 1))
-    zstd -dc "$f" 2>/dev/null | python3 -c "
+    zdecompress "$f" 2>/dev/null | python3 -c "
 import sys, json
 rows = 0; prev = None; gaps = []
 for raw in sys.stdin.buffer:
