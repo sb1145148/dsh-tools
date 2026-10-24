@@ -26,7 +26,7 @@ mkdir -p "$PREFIX" 2>/dev/null || true
 [ -w "$PREFIX" ] || { say "❌ $PREFIX 不可写。加 sudo，或换 --prefix ~/bin"; exit 1; }
 
 INSTALLED=""
-for f in dsh-backup dsh-restore dsh-repair dsh-strip dsh-doctor dsh-events dsh-recover dsh-reindex; do
+for f in dsh-backup dsh-restore dsh-repair dsh-strip dsh-reframe dsh-doctor dsh-events; do
   # 包里缺这个就跳过，不要整个安装挂掉
   if [ ! -f "$HERE/bin/$f" ]; then
     say "   ⏭  $f（包里没有，跳过）"
@@ -73,6 +73,10 @@ if has dsh-strip; then
 fi
 if has dsh-events; then
   say "   dsh-events                  当前 harness 认识哪些事件类型"
+fi
+if has dsh-reframe; then
+  say "   dsh-reframe                 查会话帧布局（最隐蔽的一类问题）"
+  say "   dsh-reframe --fix           重切帧，修好打不开的会话"
 fi
 
 if has dsh-doctor; then

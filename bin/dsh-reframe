@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+# ============================================================
+#  dsh-reframe —— 把会话日志重切成 DSH 能认的帧布局
+#
+#  症状（最隐蔽的一种）：
+#    会话文件明明在磁盘上，大小也对，zstd 能解压、JSON 能解析，
+#    但应用里就是看不到这个对话 —— **既不报错也不提示**。
+#
+#  原因：
+#    DSH 的读取器有个断言（session-persistence-jsonl）：
+#
+#      function assertZstdHeaderFrame(plaintext) {
+#        if (plaintext.length === 0 ||
+#            plaintext.indexOf(10) !== plaintext.length - 1)
+#          throw new Error("first frame is not exactly one header line");
+#      }
+#
+#    **首帧必须恰好是一行（以单个换行结尾）。**
+#    整份文件压成一个帧的写法会被判损坏，然后被静默跳过。
+#
+#    两种写法文件名一样、header 里都写 version:4，
+#    所以从版本号完全看不出来 —— 只能看帧布局。
+#
+#  谁会产生坏布局：
+#    任何"整份重压"的做法。比如 `zstd -f -o out in.jsonl` 默认
+#    只出一个帧 —— 用它重写会话就会把好文件写坏。
+#
+#  用法:
+#    dsh-reframe                  检查所有会话（不改）
+#    dsh-reframe --fix            修所有坏掉的
+#    dsh-reframe <文件...>        只处理指定文件
+#    dsh-reframe --fix <文件...>  修指定的
+#    dsh-reframe --rollback       回退（*.before-reframe → 原文件）
+#
+#  依赖：python3 + libzstd（系统自带，不需要 zstd 命令）
+# ============================================================
+import ctypes
+import ctypes.util
+import glob
+import os
+import shutil
+import sys
+import tempfile
+
+VERSION = "1.0.0"
+
+# ------------------------------------------------------------
+#  libzstd 绑定
+# ------------------------------------------------------------
+def _load_lib():
+    cands = [
+        ctypes.util.find_library('zstd'),
+        '/lib/aarch64-linux-gnu/libzstd.so.1',
+        '/usr/lib/aarch64-linux-gnu/libzstd.so.1',
+        '/lib/x86_64-linux-gnu/libzstd.so.1',
+        '/usr/lib/x86_64-linux-gnu/libzstd.so.1',
+        'libzstd.so.1',
+    ]
+    for c in cands:
+        if not c:
+            continue
+        try:
+            return ctypes.CDLL(c)
+        except OSError:
+            continue
+    raise RuntimeError('找不到 libzstd')
+
+
+lib = _load_lib()
+lib.ZSTD_findFrameCompressedSize.restype = ctypes.c_size_t
+lib.ZSTD_findFrameCompressedSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_decompress.restype = ctypes.c_size_t
+lib.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
+lib.ZSTD_getFrameContentSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_compress.restype = ctypes.c_size_t
+lib.ZSTD_compress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+lib.ZSTD_compressBound.restype = ctypes.c_size_t
+lib.ZSTD_compressBound.argtypes = [ctypes.c_size_t]
+lib.ZSTD_isError.restype = ctypes.c_uint
+lib.ZSTD_isError.argtypes = [ctypes.c_size_t]
+lib.ZSTD_getErrorName.restype = ctypes.c_char_p
+lib.ZSTD_getErrorName.argtypes = [ctypes.c_size_t]
+
+
+def _err(rc):
+    return lib.ZSTD_getErrorName(rc).decode()
+
+
+def split_frames(buf):
+    out, off, n = [], 0, len(buf)
+    while off < n:
+        sz = lib.ZSTD_findFrameCompressedSize(buf[off:], n - off)
+        if lib.ZSTD_isError(sz):
+            raise RuntimeError('帧定位失败 @%d: %s' % (off, _err(sz)))
+        if sz == 0:
+            break
+        out.append((off, sz))
+        off += sz
+    return out
+
+
+def decompress_frame(data):
+    csz = lib.ZSTD_getFrameContentSize(data, len(data))
+    cap = csz if csz < (1 << 60) else len(data) * 200 + 65536
+    dst = ctypes.create_string_buffer(cap)
+    r = lib.ZSTD_decompress(dst, cap, data, len(data))
+    if lib.ZSTD_isError(r):
+        raise RuntimeError('解压失败: %s' % _err(r))
+    return dst.raw[:r]
+
+
+def compress_frame(data, level=19):
+    cap = lib.ZSTD_compressBound(len(data))
+    dst = ctypes.create_string_buffer(cap)
+    r = lib.ZSTD_compress(dst, cap, data, len(data), level)
+    if lib.ZSTD_isError(r):
+        raise RuntimeError('压缩失败: %s' % _err(r))
+    return dst.raw[:r]
+
+
+def read_all(path):
+    buf = open(path, 'rb').read()
+    return b''.join(decompress_frame(buf[o:o + s]) for o, s in split_frames(buf))
+
+
+def inspect(path):
+    """返回 (首帧是否恰好一行, 帧数, 首帧字节数, 总解压字节数, 行数)"""
+    buf = open(path, 'rb').read()
+    frames = split_frames(buf)
+    first = decompress_frame(buf[frames[0][0]:frames[0][0] + frames[0][1]])
+    ok = (len(first) > 0 and first.count(b'\n') == 1 and first.endswith(b'\n'))
+    total = 0
+    lines = 0
+    for o, s in frames:
+        d = decompress_frame(buf[o:o + s])
+        total += len(d)
+        lines += d.count(b'\n')
+    return ok, len(frames), len(first), total, lines
+
+
+def write_session(path, content):
+    """首帧只装 header 行，正文一帧。返回写入字节数。"""
+    nl = content.find(b'\n')
+    if nl < 0:
+        raise RuntimeError('内容里没有换行，不是合法会话日志')
+    head = content[:nl + 1]
+    rest = content[nl + 1:]
+    out = compress_frame(head)
+    if rest:
+        out += compress_frame(rest)
+    with open(path, 'wb') as f:
+        f.write(out)
+    return len(out)
+
+
+# ------------------------------------------------------------
+#  主流程
+# ------------------------------------------------------------
+def main():
+    args = sys.argv[1:]
+    mode = 'check'
+    as_json = False
+    targets = []
+
+    for a in args:
+        if a in ('-h', '--help'):
+            print(__doc__ if __doc__ else '')
+            print('用法: dsh-reframe [--fix|--rollback] [文件...]')
+            return 0
+        elif a == '--fix':
+            mode = 'fix'
+        elif a == '--rollback':
+            mode = 'rollback'
+        elif a == '--json':
+            as_json = True
+        elif a.startswith('-'):
+            print('❌ 不认识的选项: %s' % a, file=sys.stderr)
+            return 1
+        else:
+            targets.append(a)
+
+    home = os.path.expanduser('~')
+    sess = os.path.join(home, '.dsh', 'sessions')
+
+    if mode == 'rollback':
+        n = 0
+        for p in glob.glob(os.path.join(sess, '**', '*.before-reframe'), recursive=True):
+            dst = p[:-len('.before-reframe')]
+            shutil.copy2(p, dst)
+            print('  ↩︎  %s' % os.path.relpath(dst, sess))
+            n += 1
+        print('✅ 回退 %d 个' % n)
+        return 0
+
+    if not targets:
+        targets = sorted(glob.glob(os.path.join(sess, '**', 'session.v*.jsonl.zstd'), recursive=True))
+
+    if not targets:
+        print('没有找到会话文件')
+        return 0
+
+    if not as_json:
+        print('🔍 检查 %d 个会话...' % len(targets))
+        print()
+
+    bad = []
+    for p in targets:
+        try:
+            ok, nf, firstlen, total, lines = inspect(p)
+        except Exception as e:
+            if not as_json:
+                print('  ❌ %s' % os.path.basename(os.path.dirname(p)))
+                print('     %s' % e)
+            bad.append(p)
+            continue
+
+        name = os.path.basename(os.path.dirname(p))[:44]
+        if ok:
+            if not as_json:
+                print('  ✅ %-46s %4d 帧  首帧 %dB  %d 行' % (name, nf, firstlen, lines))
+        else:
+            if not as_json:
+                print('  ❌ %-46s %4d 帧  首帧 %dB → 应用会静默跳过' % (name, nf, firstlen))
+                print('     内容其实完好：%d 字节 / %d 行' % (total, lines))
+            bad.append(p)
+
+    if as_json:
+        import json as _json
+        print(_json.dumps({'total': len(targets), 'bad': len(bad),
+                           'files': [os.path.basename(os.path.dirname(p)) for p in bad]},
+                          ensure_ascii=False))
+        return 0 if not bad else 1
+
+    print()
+    if not bad:
+        print('✅ 全部是合法布局，不用改')
+        return 0
+
+    print('发现 %d 个布局不对的会话。' % len(bad))
+    print('这些会话的内容**是完整的**，只是首帧没切成一行 —— 重切一下就能被认。')
+    print()
+
+    if mode != 'fix':
+        print('修复:')
+        print('  dsh-reframe --fix              # 全修')
+        print('  dsh-reframe --fix <文件>       # 修指定的')
+        print()
+        print('⚠️  先停 Web（会话文件是活的），修改前会存 *.before-reframe')
+        return 1
+
+    print('🔧 开始修复')
+    print()
+    fixed = 0
+    for p in bad:
+        name = os.path.basename(os.path.dirname(p))[:44]
+        bak = p + '.before-reframe'
+        try:
+            content = read_all(p)
+            if not os.path.exists(bak):
+                shutil.copy2(p, bak)
+            tmp = p + '.reframing'
+            size = write_session(tmp, content)
+            # 自检
+            chk = read_all(tmp)
+            if chk != content:
+                os.unlink(tmp)
+                print('  ❌ %s 自检不一致，跳过' % name)
+                continue
+            os.replace(tmp, p)
+            ok, nf, firstlen, total, lines = inspect(p)
+            print('  ✅ %-46s → 首帧 %dB（一行）%d 帧  %d 行' % (name, firstlen, nf, lines))
+            fixed += 1
+        except Exception as e:
+            print('  ❌ %s: %s' % (name, e))
+
+    print()
+    print('✅ 修好 %d 个' % fixed)
+    print()
+    print('回退:')
+    print('  dsh-reframe --rollback')
+    print()
+    print('接下来:')
+    print('  1. 启动 Web')
+    print('  2. 打开对话列表，看那些会话回来了没')
+    return 0 if fixed else 1
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

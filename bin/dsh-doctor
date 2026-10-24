@@ -23,7 +23,7 @@
 # ============================================================
 set -u
 
-TOOLS_VERSION="1.5.0"
+TOOLS_VERSION="2.0.0"
 HOME_DIR="${HOME:-/root}"
 DSH="$HOME_DIR/.dsh"
 SESS="$DSH/sessions"
@@ -86,7 +86,6 @@ die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 [ -d "$DSH" ] || die "找不到 $DSH"
-have zstd    || die "需要 zstd"
 have python3 || die "需要 python3"
 
 # ============================================================
@@ -150,7 +149,7 @@ APPV=$(timeout 8 curl -s -H @/root/.dsh/.bridge_headers "http://127.0.0.1:3090/a
        | sed -n 's/.*APP_VERSION=\([^\\]*\).*/\1/p' | head -1)
 APPV=${APPV:-未知}
 MISS=""
-for c in tar stat find cp sed grep head mktemp zstd python3; do
+for c in tar stat find cp sed grep head mktemp python3; do
   have "$c" || MISS="$MISS $c"
 done
 
@@ -165,46 +164,94 @@ UNKNOWN_EV=0
 TOTAL_EV=0
 
 if [ "$N_SESS" -gt 0 ]; then
-  printf '%s\n' "$SESS_FILES" | while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    # 能不能读 + 解压
-    if ! zstd -dc "$f" > "$T/one.jsonl" 2>/dev/null; then
-      printf 'UNREADABLE\t%s\n' "$f" >> "$T/issues"
-      continue
-    fi
-    # seq 连续性 + 事件类型分类
-    KNOWN_EVENTS="$KNOWN_EVENTS" python3 - "$T/one.jsonl" "$f" <<'PY' >> "$T/issues"
-import json, os, sys
-src, path = sys.argv[1], sys.argv[2]
-known = set(os.environ["KNOWN_EVENTS"].split())
-prev = 0
-gap_at = None
-for line in open(src, encoding='utf-8'):
-    line = line.strip()
-    if not line: continue
-    try: d = json.loads(line)
-    except Exception: continue
-    s = d.get('seq')
-    if isinstance(s, int):
-        if gap_at is None and prev and s != prev + 1:
-            gap_at = (prev, s)
-        prev = s
-    t = d.get('type') or ''
-    # 不在 harness 核心表里 —— 只说「非核心」，不说「有问题」
-    if t and t not in known:
-        print(f"NONCORE\t{path}\t{t}")
-if gap_at:
-    print(f"GAP\t{path}\t{gap_at[0]}\t{gap_at[1]}")
+  # 一次 Python 调用读完所有会话（用 libzstd，不依赖 zstd 命令）。
+  # 输出: UNREADABLE / GAP / NONCORE / FRAMEBAD
+  KNOWN_EVENTS="$KNOWN_EVENTS" python3 - "$SESS" <<'PY' >> "$T/issues"
+import ctypes, ctypes.util, glob, json, os, sys
+
+def load():
+    for c in [ctypes.util.find_library('zstd'),
+              '/lib/aarch64-linux-gnu/libzstd.so.1',
+              '/usr/lib/aarch64-linux-gnu/libzstd.so.1',
+              '/lib/x86_64-linux-gnu/libzstd.so.1',
+              '/usr/lib/x86_64-linux-gnu/libzstd.so.1', 'libzstd.so.1']:
+        if not c: continue
+        try: return ctypes.CDLL(c)
+        except OSError: pass
+    return None
+
+lib = load()
+if lib is None:
+    print('NOZLIB')
+    sys.exit(0)
+
+lib.ZSTD_findFrameCompressedSize.restype = ctypes.c_size_t
+lib.ZSTD_findFrameCompressedSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_decompress.restype = ctypes.c_size_t
+lib.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
+lib.ZSTD_getFrameContentSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_isError.restype = ctypes.c_uint
+lib.ZSTD_isError.argtypes = [ctypes.c_size_t]
+
+def frames(buf):
+    out, off, n = [], 0, len(buf)
+    while off < n:
+        sz = lib.ZSTD_findFrameCompressedSize(buf[off:], n - off)
+        if lib.ZSTD_isError(sz) or sz == 0: break
+        out.append((off, sz)); off += sz
+    return out
+
+def dec(data):
+    csz = lib.ZSTD_getFrameContentSize(data, len(data))
+    cap = csz if csz < (1 << 60) else len(data) * 200 + 65536
+    dst = ctypes.create_string_buffer(cap)
+    r = lib.ZSTD_decompress(dst, cap, data, len(data))
+    if lib.ZSTD_isError(r): raise RuntimeError('decompress')
+    return dst.raw[:r]
+
+root = sys.argv[1]
+known = set(os.environ['KNOWN_EVENTS'].split())
+for path in sorted(glob.glob(os.path.join(root, '**', 'session.v*.jsonl.zstd'), recursive=True)):
+    try:
+        buf = open(path, 'rb').read()
+        fr = frames(buf)
+        if not fr: raise RuntimeError('no frames')
+        first = dec(buf[fr[0][0]:fr[0][0] + fr[0][1]])
+        one_line = len(first) > 0 and first.count(b'\n') == 1 and first.endswith(b'\n')
+        if not one_line:
+            print('FRAMEBAD\t%s\t%d' % (path, len(fr)))
+        content = b''.join(dec(buf[o:o + s]) for o, s in fr)
+    except Exception:
+        print('UNREADABLE\t%s' % path)
+        continue
+    prev = 0; gap = None
+    for line in content.split(b'\n'):
+        if not line.strip(): continue
+        try: d = json.loads(line)
+        except Exception: continue
+        q = d.get('seq')
+        if isinstance(q, int):
+            if gap is None and prev and q != prev + 1: gap = (prev, q)
+            prev = q
+        t = d.get('type') or ''
+        if t and t not in known:
+            print('NONCORE\t%s\t%s' % (path, t))
+    if gap:
+        print('GAP\t%s\t%d\t%d' % (path, gap[0], gap[1]))
 PY
-  done
 fi
 
+NOZLIB=$(grep -c '^NOZLIB' "$T/issues" 2>/dev/null || true)
+FR_BAD=$(grep -c '^FRAMEBAD' "$T/issues" 2>/dev/null || true)
 UNREADABLE=$(grep -c '^UNREADABLE' "$T/issues" 2>/dev/null || true)
 GAPS=$(grep -c '^GAP' "$T/issues" 2>/dev/null || true)
 NC_TYPES=$(grep '^NONCORE' "$T/issues" 2>/dev/null | cut -f3 | sort -u | tr '\n' ' ' | sed 's/ $//')
 NC_COUNT=$(grep -c '^NONCORE' "$T/issues" 2>/dev/null || true)
 
+NOZLIB=${NOZLIB:-0}; FR_BAD=${FR_BAD:-0}
 UNREADABLE=${UNREADABLE:-0}; GAPS=${GAPS:-0}; NC_COUNT=${NC_COUNT:-0}
+case "$FR_BAD" in *[!0-9]*|"") FR_BAD=0;; esac
 case "$UNREADABLE" in *[!0-9]*|"") UNREADABLE=0;; esac
 case "$GAPS" in *[!0-9]*|"") GAPS=0;; esac
 case "$NC_COUNT" in *[!0-9]*|"") NC_COUNT=0;; esac
@@ -258,6 +305,15 @@ fi
 [ "$UNREADABLE" -gt 0 ] && say "  读不了:     ❌ $UNREADABLE 个" || say "  读不了:     ✅ 0"
 [ "$GAPS" -gt 0 ]       && say "  seq 断档:   ⚠️  $GAPS 个" || say "  seq 断档:   ✅ 0"
 [ "$NC_COUNT" -gt 0 ]  && say "  非核心事件: ℹ️  $NC_COUNT 条（$NC_TYPES）" || say "  非核心事件: ✅ 0"
+# 帧布局 —— 最容易漏、后果最隐蔽的一项
+if [ "$NOZLIB" -gt 0 ]; then
+  say "  帧布局:     ⚠️  读不到 libzstd，这项没法查"
+elif [ "$FR_BAD" -gt 0 ]; then
+  say "  帧布局:     ❌ $FR_BAD 个首帧不是一行（应用会静默跳过）"
+  say "              修: dsh-reframe --fix"
+else
+  say "  帧布局:     ✅ 全部合法"
+fi
 case "$EVENTS_SOURCE" in
   harness)  say "  事件表:     取自已安装的 harness（$(printf '%s' "$KNOWN_EVENTS" | wc -w) 种）" ;;
   fallback) say "  事件表:     ⚠️  读不到 harness，用的是内置参考列表"
@@ -274,7 +330,7 @@ else
   say "  最近备份:   ✅ $BK_AGE 天前  $(basename "$LAST_BK")"
 fi
 
-TOTAL_PROB=$((UNREADABLE + GAPS))
+TOTAL_PROB=$((UNREADABLE + GAPS + FR_BAD))
 say ""
 say "──────────────────────────────────────"
 # 注意：指定了 --strip-type 就不能在这里退出 ——
@@ -300,6 +356,13 @@ say ""
 if [ "$UNREADABLE" -gt 0 ]; then
   say "  ❌ 读不了的文件（工具帮不上，需要看具体报错）:"
   grep '^UNREADABLE' "$T/issues" | cut -f2 | sed "s|$SESS/|     |" | head -5
+  say ""
+fi
+if [ "$FR_BAD" -gt 0 ]; then
+  say "  ❌ 帧布局不对（应用会静默跳过，内容完好）:"
+  grep '^FRAMEBAD' "$T/issues" | cut -f2 | sed "s|$SESS/|     |" | head -5
+  say ""
+  say "     修: dsh-reframe --fix"
   say ""
 fi
 if [ "$GAPS" -gt 0 ]; then

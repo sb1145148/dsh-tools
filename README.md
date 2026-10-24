@@ -442,6 +442,50 @@ DSHA 的会话文件叫 `session.v4.jsonl.zstd` —— `v4` 是格式版本。
 
 **不认识的格式直接停下，要越过得显式加 `--force`。**
 
+## ⚠️ 最隐蔽的一类问题：帧布局
+
+**症状：** 会话文件在磁盘上、大小也对、`zstd -dc` 能解、JSON 能解析 ——
+但应用里就是看不到，**也不报任何错**。
+
+**原因：** DSH 的读取器要求**首帧恰好是 header 这一行**：
+
+```js
+function assertZstdHeaderFrame(plaintext) {
+  if (plaintext.length === 0 || plaintext.indexOf(10) !== plaintext.length - 1)
+    throw new Error("first frame is not exactly one header line");
+}
+```
+
+整份文件压成一个帧 → 判损坏 → **静默跳过**。
+
+**谁会写坏它：** 任何"整份重压"的做法，比如 `zstd -f -o out in`。
+它默认只出一个帧。
+
+**怎么查：**
+
+```bash
+dsh-reframe
+```
+
+```console
+🔍 检查 13 个会话...
+
+  ✅ session-9441bf7c...    907 帧  首帧 230B  1735 行
+  ❌ session-0df3b6aa...      1 帧  首帧 2018680B → 应用会静默跳过
+     内容其实完好：2018680 字节 / 754 行
+```
+
+**怎么修：**
+
+```bash
+dsh-reframe --fix        # 重切帧，内容一行不动
+dsh-reframe --rollback   # 回退
+```
+
+**实测 11 个坏会话全部救回，内容字节级一致。**
+
+---
+
 ## 🩺 一条命令体检
 
 ```bash

@@ -1,5 +1,102 @@
 # 更新日志
 
+## 2.0.0 — 2026-10-24
+
+**修一个我自己造成的严重问题：工具把会话文件写坏了。**
+
+### 问题
+
+`dsh-strip` 和 `dsh-doctor --fix` 重写会话时用的是
+
+```sh
+zstd -q -f -19 -o out.jsonl.zstd in.jsonl
+```
+
+**这个命令默认只产生一个帧。**
+
+而 DSH 的读取器要求（`session-persistence-jsonl`）：
+
+```js
+function assertZstdHeaderFrame(plaintext) {
+  if (plaintext.length === 0 || plaintext.indexOf(10) !== plaintext.length - 1)
+    throw new Error("corrupt Zstandard session log: first frame is not exactly one header line");
+}
+```
+
+**首帧必须恰好是一行。** 整份一个帧 → 判损坏 → **静默跳过**。
+
+于是：文件在、大小对、`zstd -dc` 能解、JSON 能解析，但应用里就是看不到，
+**也不报任何错**。
+
+实测：`dsh-backup-20261023-19439` 之前的备份全是合法布局，
+`1951` 那次的 11 个会话**全部变成单帧**（首帧最大 51 MB）——
+中间的差别就是跑了一次 `dsh-doctor --fix`。
+
+### 修法
+
+**① 所有重写会话的地方改用正确切帧**
+
+```python
+frame1 = compress(header_line)     # 首帧只装一行
+frame2 = compress(rest)            # 正文另起
+```
+
+`dsh-strip` 整个重写成 Python（用 `libzstd` + ctypes），不再依赖 `zstd` 命令。
+
+**② 新增 `dsh-reframe`** —— 把坏布局重切回去
+
+```bash
+dsh-reframe              # 检查
+dsh-reframe --fix        # 修
+dsh-reframe --rollback   # 回退
+```
+
+实测把 `1951` 那个备份的 11 个会话全部救回，**内容字节级一致**：
+
+```console
+$ dsh-reframe --fix
+  ✅ session-0df3b6aa... → 首帧 262B（一行）2 帧   754 行
+  ✅ session-195e16fb... → 首帧 262B（一行）2 帧  1897 行
+  ✅ session-1d500e2a... → 首帧 202B（一行）2 帧 16414 行
+  ...
+✅ 修好 11 个
+
+比对 11 个，内容不一致 0 个 ✅
+```
+
+**③ `dsh-doctor` 内置帧布局检查**
+
+```console
+  会话（13 个）
+    帧布局:     ✅ 全部合法
+```
+
+坏的时候：
+
+```console
+    帧布局:     ❌ 1 个首帧不是一行（应用会静默跳过）
+                修: dsh-reframe --fix
+```
+
+**④ `dsh-doctor` 不再依赖 `zstd` 命令**
+
+扫描段改用 `libzstd` + ctypes。（这个环境里 `zstd` 命令被移除了，
+旧版会直接 `❌ 需要 zstd` 退出。）
+
+### 另一条结论：版本降级完全不可行
+
+- 日志**只往前兼容**。旧版读新版写的日志 → `unknown event` 或静默跳过
+- 旧版写回去的是**旧格式**，新版再读又坏
+- 来回折腾只会让数据越来越乱
+
+**正确做法：升到写这份日志的版本。**
+
+`dsh-strip` 只用来处理「某个已知类型把日志卡住」这一种情况，**不是降级手段**。
+
+### 现在 7 个工具
+
+`dsh-backup` / `dsh-restore` / `dsh-repair` / `dsh-strip` / `dsh-reframe` / `dsh-doctor` / `dsh-events`
+
 ## 1.8.0 — 2026-10-24
 
 **找到「还原完了但一个会话都看不到」的真正原因：不是文件，是索引。**

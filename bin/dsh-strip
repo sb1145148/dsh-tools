@@ -1,206 +1,304 @@
-#!/bin/sh
+#!/usr/bin/env python3
 # ============================================================
-#  dsh-strip —— 剥掉日志里「本版本不认识」的事件类型
+#  dsh-strip —— 从会话日志里剥掉指定事件类型
 #
-#  症状（应用里看到的）：
-#    failed to observe session "session-xxx":
-#    contains event type "job/registered" (seq N)
-#    unknown to this harness and not marked ignorable;
-#    refusing to interpret the log
-#    — it was likely written by a newer harness
+#  什么时候用：
+#    应用打开某个会话时报
+#      contains event type "xxx" unknown to this harness
+#      and not marked ignorable; refusing to interpret the log
+#    把那个 xxx 剥掉，日志就能被读了。
 #
-#  原因：**日志是往前兼容、不往后兼容的。**
-#    0.2.1 写的日志，0.2.0 读不懂 —— 而且不认识的事件没被标记成
-#    可忽略时，整份日志会被拒绝解释，不是跳过那一条。
+#  ⚠️ 不要为了「降级到旧版」用它 —— 降级这条路走不通。
+#     旧版读不了新版写的日志是设计如此（日志只往前兼容），
+#     剥事件只是让旧版「能打开」，但旧版还会写回旧格式，
+#     下次新版又读不了。来回折腾，越折腾越乱。
+#     正确做法：升到写这份日志的版本。
 #
-#  解法（两个）：
-#    A. 升回写这份日志的版本 —— 正统做法，推荐
-#    B. 用这个工具剥掉不认识的事件，重排 seq —— 留在旧版本时用
-#
-#  做法：删掉指定类型的事件，把剩下的 seq 重排成连续的。
-#  其它内容一行不动。
+#  ⚠️ 写回时必须切对帧：
+#     DSH 的读取器要求**首帧恰好一行**（header）。整份压成一个帧
+#     会被判损坏并静默跳过 —— 文件在、界面没有、也不报错。
+#     早期版本这里用 `zstd -o` 重压，写出来就是单帧，把好文件写坏过。
+#     现在改成：首帧只装 header 行，正文另起一帧。
 #
 #  用法:
-#    dsh-strip --mark <文件> <类型> [类型...]      # 打 ignorable 标记（推荐）
-#    dsh-strip --list <文件>                       # 只看有哪些事件类型
-#    dsh-strip --dry-run <文件> <类型...>          # 只看会做什么，不写盘
-#    dsh-strip <文件> <类型...>                    # 删除+重排 seq（有风险）
+#    dsh-strip --list <文件>                 看有哪些事件类型
+#    dsh-strip --dry-run <文件> <类型...>    只看会删多少
+#    dsh-strip <文件> <类型...>              真删
+#    dsh-strip --rollback                    回退（*.before-strip）
 #
-#  例:
-#    dsh-strip --mark session.v4.jsonl.zstd job/registered job/settled
+#  依赖：python3 + libzstd
 # ============================================================
-set -u
+import ctypes
+import ctypes.util
+import glob
+import json
+import os
+import shutil
+import sys
 
-show_help() {
-  cat <<'HLP'
-dsh-strip —— 处理会话日志里的事件类型
+VERSION = "2.0.0"
+BAK_SUFFIX = '.before-strip'
 
-用法:
-  dsh-strip --mark <文件> <类型> [类型...]   打 ignorable 标记（推荐，不删行不重排）
-  dsh-strip --list <文件>                    列出日志里所有事件类型及条数
-  dsh-strip --dry-run <文件> <类型...>       预演，不写盘
-  dsh-strip <文件> <类型...>                 删除事件并重排 seq（旧行为，有风险）
 
-说明:
-  --mark     给指定类型的事件加 "ignorable": true。harness 看到这个
-             标记会跳过该事件 —— 这是官方支持的放行方式，不删任何行、
-             不改 seq，最安全。
-  直接传类型 会删除事件并重排 seq。1.5.x 之前是默认行为，实测会导致
-             应用内部计数器不同步、会话从列表消失。除非明确需要，别用。
-
-例:
-  dsh-strip --mark session.v4.jsonl.zstd job/registered job/settled
-  dsh-strip --list session.v4.jsonl.zstd
-
-环境变量:
-  DSH_HARNESS_ROOTS   覆盖 harness 搜索路径（调试用）
-  exit 0
-
-HLP
-}
-
-say()  { printf '%s\n' "$*"; }
-warn() { printf '⚠️  %s\n' "$*" >&2; }
-die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
-
-DRY=0
-MODE="strip"
-MARK=0
-SHOWHELP=0          # 1 = 只打 ignorable 标记，不删不重排
-ARGS=""
-for a in "$@"; do
-  case "$a" in
-    --list)    MODE="list" ;;
-    -h|--help) SHOWHELP=1 ;;
-    --dry-run) DRY=1 ;;
-    --mark)    MARK=1 ;;
-    -*)        die "不认识的选项: $a" ;;
-    *)         ARGS="$ARGS
-$a" ;;
-  esac
-done
-
-# 第一个非选项参数是文件，剩下的是类型
-FILE=$(printf '%s' "$ARGS" | sed -n '2p')
-TYPES=$(printf '%s' "$ARGS" | sed '1,2d' | tr '\n' ' ' | sed 's/ *$//')
-
-[ "$SHOWHELP" = "1" ] && show_help
-[ -n "$FILE" ] || die "用法: dsh-strip --mark <文件> <类型...>   （--help 看全部）"
-[ -f "$FILE" ] || die "找不到文件: $FILE"
-command -v zstd >/dev/null 2>&1 || die "需要 zstd"
-command -v python3 >/dev/null 2>&1 || die "需要 python3"
-
-T=$(mktemp -d "${TMPDIR:-/tmp}/dsh-strip.XXXXXX")
-trap 'rm -rf "$T"' EXIT INT TERM
-
-say "📂 解压..."
-zstd -dc "$FILE" > "$T/in.jsonl" 2>/dev/null || die "解压失败"
-
-# ---------- --list ----------
-if [ "$MODE" = "list" ]; then
-  say ""
-  say "📊 事件类型分布:"
-  python3 - "$T/in.jsonl" <<'PY'
-import json, sys, collections
-c = collections.Counter(); n = 0; bad = 0; mx = 0
-for line in open(sys.argv[1], encoding='utf-8'):
-    line = line.strip()
-    if not line: continue
-    n += 1
-    try: d = json.loads(line)
-    except Exception: bad += 1; continue
-    c[d.get('type') or '?'] += 1
-    s = d.get('seq')
-    if isinstance(s, int) and s > mx: mx = s
-print(f"  总行数 {n}  解析失败 {bad}  最大 seq {mx}")
-print()
-for t, k in c.most_common():
-    print(f"    {t:<42} {k:>6}")
-PY
-  exit 0
-fi
-
-[ -n "$TYPES" ] || die "要指定事件类型。先用 --list 看看有哪些"
-
-if [ "$MARK" = "1" ]; then
-  say "🏷  打 ignorable 标记（不删、不重排）: $TYPES"
-else
-  say "🔪 剥离: $TYPES"
-fi
-DPY=$(printf '%s' "$TYPES" | tr ' ' ',')
-python3 - "$T/in.jsonl" "$T/out.jsonl" "$DPY" "$DRY" "$MARK" <<'PY'
-import json, sys
-src, dst, drop, dry, mark = sys.argv[1], sys.argv[2], set(sys.argv[3].split(',')), sys.argv[4] == '1', sys.argv[5] == '1'
-kept, dropped, seq, seen = [], 0, 0, {t: 0 for t in drop}
-for line in open(src, encoding='utf-8'):
-    line = line.rstrip('\n')
-    if not line:
-        continue
-    try:
-        d = json.loads(line)
-    except Exception:
-        kept.append(line); continue
-    t = d.get('type') or ''
-    if t in drop:
-        seen[t] += 1
-        if mark:
-            # 官方支持的放行标记：harness 看到 ignorable===true 就跳过这个事件，
-            # 不删、不重排 —— seq 连续性完全不动，最安全
-            d['ignorable'] = True
-            kept.append(json.dumps(d, ensure_ascii=False, separators=(',', ':')))
+def _load_lib():
+    for c in [ctypes.util.find_library('zstd'),
+              '/lib/aarch64-linux-gnu/libzstd.so.1',
+              '/usr/lib/aarch64-linux-gnu/libzstd.so.1',
+              '/lib/x86_64-linux-gnu/libzstd.so.1',
+              '/usr/lib/x86_64-linux-gnu/libzstd.so.1',
+              'libzstd.so.1']:
+        if not c:
             continue
-        dropped += 1
-        continue
-    if not mark and 'seq' in d:
-        seq += 1
-        d['seq'] = seq
-    kept.append(json.dumps(d, ensure_ascii=False, separators=(',', ':')))
-open(dst, 'w', encoding='utf-8').write('\n'.join(kept) + '\n')
-if mark:
-    total = sum(seen.values())
-    print(f"  保留 {len(kept)} 行，其中打了标记 {total} 条（没删任何行，seq 没动）")
-else:
-    print(f"  保留 {len(kept)} 行，剥离 {dropped} 行，重排 seq 1..{seq}")
-for t, k in seen.items():
-    print(f"    {t}: {k} 条")
-PY
+        try:
+            return ctypes.CDLL(c)
+        except OSError:
+            continue
+    raise RuntimeError('找不到 libzstd')
 
-if [ "$DRY" = "1" ]; then
-  say ""
-  say "（--dry-run，没有写任何文件）"
-  exit 0
-fi
 
-OUT="$FILE.stripped"
-say "🗜  压缩..."
-zstd -q -f -19 -o "$OUT" "$T/out.jsonl" 2>/dev/null || die "压缩失败"
+lib = _load_lib()
+lib.ZSTD_findFrameCompressedSize.restype = ctypes.c_size_t
+lib.ZSTD_findFrameCompressedSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_decompress.restype = ctypes.c_size_t
+lib.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
+lib.ZSTD_getFrameContentSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+lib.ZSTD_compress.restype = ctypes.c_size_t
+lib.ZSTD_compress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+lib.ZSTD_compressBound.restype = ctypes.c_size_t
+lib.ZSTD_compressBound.argtypes = [ctypes.c_size_t]
+lib.ZSTD_isError.restype = ctypes.c_uint
+lib.ZSTD_isError.argtypes = [ctypes.c_size_t]
+lib.ZSTD_getErrorName.restype = ctypes.c_char_p
+lib.ZSTD_getErrorName.argtypes = [ctypes.c_size_t]
 
-# ---------- 自检 ----------
-# 用实际剥离的类型做残留检查，不要写死
-PAT=$(printf '%s' "$TYPES" | tr ' ' '\n' | sed 's/[][()*+?.^$|\\]/\\&/g' | grep . | paste -sd'|' -)
-if [ -n "$PAT" ]; then
-  if [ "$MARK" = "1" ]; then
-  LEFT=0   # 打标记模式本来就不删，残留是正常的
-else
-  LEFT=$(zstd -dc "$OUT" 2>/dev/null | grep -c -E "\"type\":\"($PAT)\"" 2>/dev/null || true)
-fi
-else
-  LEFT=0
-fi
-LEFT=${LEFT:-0}
-N=$(zstd -dc "$OUT" 2>/dev/null | wc -l)
 
-say ""
-say "✅ 完成"
-say "   输出: $OUT"
-say "   大小: $(stat -c%s "$OUT") 字节（原 $(stat -c%s "$FILE")）"
-say "   行数: $N"
-say "   残留指定类型: $LEFT"
-[ "$LEFT" -gt 0 ] && warn "还有残留，检查一下类型名是不是打错了"
+def _err(rc):
+    return lib.ZSTD_getErrorName(rc).decode()
 
-say ""
-say "下一步："
-say "   1. 先停 Web（会话文件是活的，边读边写）"
-say "   2. cp -a \"$FILE\" \"$FILE.before-strip\""
-say "   3. mv \"$OUT\" \"$FILE\""
-say "   4. 启动 Web，打开那个会话确认"
+
+def split_frames(buf):
+    out, off, n = [], 0, len(buf)
+    while off < n:
+        sz = lib.ZSTD_findFrameCompressedSize(buf[off:], n - off)
+        if lib.ZSTD_isError(sz):
+            raise RuntimeError('帧定位失败 @%d: %s' % (off, _err(sz)))
+        if sz == 0:
+            break
+        out.append((off, sz))
+        off += sz
+    return out
+
+
+def decompress_frame(data):
+    csz = lib.ZSTD_getFrameContentSize(data, len(data))
+    cap = csz if csz < (1 << 60) else len(data) * 200 + 65536
+    dst = ctypes.create_string_buffer(cap)
+    r = lib.ZSTD_decompress(dst, cap, data, len(data))
+    if lib.ZSTD_isError(r):
+        raise RuntimeError('解压失败: %s' % _err(r))
+    return dst.raw[:r]
+
+
+def compress_frame(data, level=19):
+    cap = lib.ZSTD_compressBound(len(data))
+    dst = ctypes.create_string_buffer(cap)
+    r = lib.ZSTD_compress(dst, cap, data, len(data), level)
+    if lib.ZSTD_isError(r):
+        raise RuntimeError('压缩失败: %s' % _err(r))
+    return dst.raw[:r]
+
+
+def read_all(path):
+    buf = open(path, 'rb').read()
+    return b''.join(decompress_frame(buf[o:o + s]) for o, s in split_frames(buf))
+
+
+def write_session(path, content):
+    """首帧只装 header 行，正文一帧 —— 这是 DSH 读取器要求的布局。"""
+    nl = content.find(b'\n')
+    if nl < 0:
+        raise RuntimeError('内容里没有换行，不是合法会话日志')
+    head, rest = content[:nl + 1], content[nl + 1:]
+    pack = [compress_frame(head)]
+    if rest:
+        pack.append(compress_frame(rest))
+    data = b''.join(pack)
+    with open(path, 'wb') as f:
+        f.write(data)
+    return len(data)
+
+
+def first_frame_is_one_line(path):
+    buf = open(path, 'rb').read()
+    fr = split_frames(buf)
+    first = decompress_frame(buf[fr[0][0]:fr[0][0] + fr[0][1]])
+    return len(first) > 0 and first.count(b'\n') == 1 and first.endswith(b'\n')
+
+
+def iter_events(content):
+    for line in content.split(b'\n'):
+        if not line.strip():
+            continue
+        yield line
+
+
+def main():
+    args = sys.argv[1:]
+    mode = 'strip'
+    dry = False
+    pos = []
+
+    for a in args:
+        if a in ('-h', '--help'):
+            print(__doc__)
+            return 0
+        elif a == '--list':
+            mode = 'list'
+        elif a == '--dry-run':
+            dry = True
+        elif a == '--rollback':
+            mode = 'rollback'
+        elif a.startswith('-'):
+            print('❌ 不认识的选项: %s' % a, file=sys.stderr)
+            return 1
+        else:
+            pos.append(a)
+
+    if mode == 'rollback':
+        home = os.path.expanduser('~')
+        sess = os.path.join(home, '.dsh', 'sessions')
+        n = 0
+        for p in glob.glob(os.path.join(sess, '**', '*' + BAK_SUFFIX), recursive=True):
+            dst = p[:-len(BAK_SUFFIX)]
+            shutil.copy2(p, dst)
+            print('  ↩︎  %s' % os.path.relpath(dst, sess))
+            n += 1
+        print('✅ 回退 %d 个' % n)
+        return 0
+
+    # 第一个非选项是文件，后面是类型；也接受「一段报错原文」，自动取第一个像类型的词
+    if not pos:
+        print('用法: dsh-strip <文件> <类型...>', file=sys.stderr)
+        return 1
+
+    path = pos[0]
+    if not os.path.isfile(path):
+        print('❌ 找不到文件: %s' % path, file=sys.stderr)
+        return 1
+
+    raw_types = pos[1:]
+    # 容错：从报错里整段复制时，只保留像 "xx/yy" 的词
+    types = []
+    for t in raw_types:
+        for tok in t.replace('"', ' ').replace("'", ' ').replace('(', ' ').replace(')', ' ').split():
+            if '/' in tok and not tok.endswith('/'):
+                types.append(tok)
+                break
+        else:
+            # 没有斜杠也认（有些事件名不带 /）
+            tok = t.strip().strip('"\'')
+            if tok and '/' not in tok:
+                types.append(tok)
+    # 去重保序
+    seen = set()
+    types = [t for t in types if not (t in seen or seen.add(t))]
+
+    try:
+        content = read_all(path)
+    except Exception as e:
+        print('❌ 读不了: %s' % e, file=sys.stderr)
+        return 1
+
+    if mode == 'list':
+        counts = {}
+        bad = 0
+        n = 0
+        seqs = []
+        for line in iter_events(content):
+            n += 1
+            try:
+                d = json.loads(line)
+            except Exception:
+                bad += 1
+                continue
+            counts[d.get('type') or '?'] = counts.get(d.get('type') or '?', 0) + 1
+            if isinstance(d.get('seq'), int):
+                seqs.append(d['seq'])
+        print('📊 事件类型分布')
+        print('  总行数 %d  解析失败 %d  最大 seq %d' % (n, bad, max(seqs) if seqs else 0))
+        ok = first_frame_is_one_line(path)
+        print('  首帧一行: %s' % ('✅' if ok else '❌（应用会静默跳过，用 dsh-reframe 修）'))
+        print()
+        for t, c in sorted(counts.items(), key=lambda x: -x[1]):
+            print('    %-44s %6d' % (t, c))
+        return 0
+
+    if not types:
+        print('❌ 要指定事件类型。先用 --list 看看有哪些', file=sys.stderr)
+        return 1
+
+    print('🔪 剥离: %s' % ' '.join(types))
+    drop = set(types)
+    kept = []
+    dropped = 0
+    seen_types = {t: 0 for t in types}
+    seq = 0
+    for line in iter_events(content):
+        try:
+            d = json.loads(line)
+        except Exception:
+            kept.append(line)
+            continue
+        t = d.get('type') or ''
+        if t in drop:
+            dropped += 1
+            seen_types[t] += 1
+            continue
+        if 'seq' in d:
+            seq += 1
+            d['seq'] = seq
+        kept.append(json.dumps(d, ensure_ascii=False, separators=(',', ':')).encode())
+
+    print('  保留 %d 行，剥离 %d 行，重排 seq 1..%d' % (len(kept), dropped, seq))
+    for t, c in seen_types.items():
+        print('    %s: %d 条' % (t, c))
+
+    if dry:
+        print()
+        print('（--dry-run，没有写任何文件）')
+        return 0
+
+    out = b'\n'.join(kept) + b'\n'
+    if not os.path.exists(path + BAK_SUFFIX):
+        shutil.copy2(path, path + BAK_SUFFIX)
+        print('  💾 原文件存为 %s' % os.path.basename(path + BAK_SUFFIX))
+
+    tmp = path + '.stripping'
+    size = write_session(tmp, out)
+
+    # 自检：解回来必须一致；首帧必须一行
+    if read_all(tmp) != out:
+        os.unlink(tmp)
+        print('❌ 自检失败（解回来不一致），未改动原文件', file=sys.stderr)
+        return 1
+    if not first_frame_is_one_line(tmp):
+        os.unlink(tmp)
+        print('❌ 自检失败（首帧不是一行），未改动原文件', file=sys.stderr)
+        return 1
+
+    os.replace(tmp, path)
+    print()
+    print('✅ 完成')
+    print('   文件 %d 字节（原 %d）' % (size, len(content and open(path + BAK_SUFFIX, 'rb').read())))
+    print('   首帧一行 ✅')
+    print()
+    print('回退: dsh-strip --rollback')
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
