@@ -1,0 +1,237 @@
+#!/bin/sh
+# ============================================================
+#  dsh-relink —— 把「同一份内容的多个拷贝」重新连成硬链接
+#
+#  用法:
+#    dsh-relink                只扫描，报告能省多少（默认不动手）
+#    dsh-relink --apply        真的连（副本改成硬链接）
+#    dsh-relink --min 5M       只看大于该尺寸的文件（默认 1M）
+#    dsh-relink --root DIR     扫描别的目录（可重复；默认扫描 attachments）
+#    dsh-relink --verify       连完再逐个校验 sha256（慢，但最稳）
+#    dsh-relink --json         机器可读输出
+#
+#  为什么需要它:
+#    ~/.dsh/attachments/v1 的设计是「一个内容对象 + 多个展示名，
+#    靠硬链接共享同一份数据」。但下面两种情况会把这个设计弄坏，
+#    让同一份内容变成两份（或更多）真实拷贝，体积直接翻倍：
+#
+#      ① 备份/还原、跨文件系统拷贝 —— 硬链接不跟着走，解出来是独立文件
+#      ② 设备文件系统不支持 link() —— 实现退化成全量复制
+#         （DSHA issue #209 就是这个：复制量翻倍 → CAS 对齐超时 → 启动失败）
+#
+#    体积翻倍不只是浪费空间：后续任何「全量复制/校验」的步骤都会变慢一倍。
+#
+#  安全性:
+#    · 默认 dry-run，什么都不改
+#    · 只处理「内容完全相同」的文件（先比尺寸，再比 sha256）
+#    · 不跨设备（跨设备 ln 本来就失败）
+#    · 已经是硬链接的跳过
+#    · 通过临时名 + rename 原子替换，不会出现「删了没连上」的窗口
+# ============================================================
+set -u
+
+MODE="scan"
+MIN_BYTES=$((1024 * 1024))
+VERIFY=0
+JSON=0
+ROOTS=""
+
+for a in "$@"; do
+  case "$a" in
+    --apply) MODE="apply" ;;
+    --verify) VERIFY=1 ;;
+    --json) JSON=1 ;;
+    -h|--help)
+      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    --min)
+      MIN_NEXT=1 ;;
+    --root)
+      ROOT_NEXT=1 ;;
+    -*)
+      echo "不认识的参数: $a" >&2
+      exit 2 ;;
+    *)
+      if [ "${MIN_NEXT:-0}" = "1" ]; then
+        MIN_BYTES=$(python3 -c "import sys,re;m=re.match(r'^(\d+(?:\.\d+)?)\s*([kKmMgG]?)[bB]?$',sys.argv[1]);
+assert m,'bad';n=float(m.group(1));u=(m.group(2) or '').lower();
+print(int(n*{'':1,'k':1024,'m':1024**2,'g':1024**3}[u]))" "$a") || { echo "尺寸写法不对: $a" >&2; exit 2; }
+        MIN_NEXT=0
+      elif [ "${ROOT_NEXT:-0}" = "1" ]; then
+        ROOTS="$ROOTS$a
+"
+        ROOT_NEXT=0
+      else
+        echo "多余的参数: $a（目录请用 --root）" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+if [ -z "$ROOTS" ]; then
+  HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
+  if [ -d "$HOME_DIR/attachments" ]; then
+    ROOTS="$HOME_DIR/attachments
+"
+  else
+    ROOTS="$HOME_DIR"
+  fi
+fi
+
+export DSH_RELINK_MODE="$MODE"
+export DSH_RELINK_MIN="$MIN_BYTES"
+export DSH_RELINK_VERIFY="$VERIFY"
+export DSH_RELINK_JSON="$JSON"
+export DSH_RELINK_ROOTS="$ROOTS"
+
+exec python3 - <<'PY'
+import os, sys, hashlib, json, stat
+
+MODE   = os.environ.get('DSH_RELINK_MODE', 'scan')
+MIN    = int(os.environ.get('DSH_RELINK_MIN', '1048576'))
+VERIFY = os.environ.get('DSH_RELINK_VERIFY', '0') == '1'
+AS_JSON= os.environ.get('DSH_RELINK_JSON', '0') == '1'
+ROOTS  = [r for r in os.environ.get('DSH_RELINK_ROOTS', '').split('\n') if r.strip()]
+
+SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.cache'}
+
+
+def human(n):
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if n < 1024 or unit == 'GB':
+            return f'{n:.0f} {unit}' if unit == 'B' else f'{n:.1f} {unit}'
+        n /= 1024.0
+
+
+def sha256(path, chunk=1024 * 1024):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+# ---------- 1. 收集候选 ----------
+files = []   # (path, dev, ino, size, nlink)
+errors = []
+for root in ROOTS:
+    root = os.path.expanduser(root.strip())
+    if not os.path.isdir(root):
+        errors.append(f'跳过（不是目录）: {root}')
+        continue
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for name in filenames:
+            p = os.path.join(dirpath, name)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue          # 软链、设备、socket 一律不碰
+            if st.st_size < MIN:
+                continue
+            files.append((p, st.st_dev, st.st_ino, st.st_size, st.st_nlink))
+
+# ---------- 2. 先按 (设备, 尺寸) 分桶，再按 sha256 精确分组 ----------
+by_size = {}
+for rec in files:
+    by_size.setdefault((rec[1], rec[3]), []).append(rec)
+
+groups = []       # [(hash, [rec, ...]), ...] 同组内是不同 inode 的同内容文件
+for (dev, size), recs in by_size.items():
+    inodes = {r[2] for r in recs}
+    if len(inodes) < 2:
+        continue                      # 已经是硬链接或只有一个文件
+    by_hash = {}
+    for r in recs:
+        try:
+            h = sha256(r[0])
+        except OSError as e:
+            errors.append(f'读不了（跳过）: {r[0]} ({e})')
+            continue
+        by_hash.setdefault(h, []).append(r)
+    for h, rs in by_hash.items():
+        if len({x[2] for x in rs}) > 1:
+            groups.append((h, rs))
+
+# ---------- 3. 处理 ----------
+saved = 0
+linked = []
+for h, rs in groups:
+    # 优先把「已经被最多路径共享」的 inode 当原件，其次看路径短
+    rs.sort(key=lambda r: (-r[4], len(r[0]), r[0]))
+    keep = rs[0]
+    for dup in rs[1:]:
+        if dup[2] == keep[2]:
+            continue                     # 已经是指向同一个 inode，不用动
+        size = dup[3]
+        if MODE != 'apply':
+            saved += size
+            linked.append((dup[0], keep[0], size, 'dry-run'))
+            continue
+        tmp = os.path.join(os.path.dirname(dup[0]), f'.relink-tmp-{os.getpid()}')
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            os.link(keep[0], tmp)            # 先连到临时名
+            os.replace(tmp, dup[0])          # 再原子替换掉副本
+        except OSError as e:
+            import errno as _e
+            if e.errno in (_e.EPERM, _e.EOPNOTSUPP, getattr(_e, 'ENOTSUP', _e.EOPNOTSUPP), _e.EXDEV):
+                reason = {_e.EPERM: '该文件系统不允许硬链接（/sdcard 这类 FUSE 挂载常见）',
+                          _e.EXDEV: '跨文件系统，硬链接不成立'}.get(
+                    e.errno, '该文件系统不支持硬链接')
+                errors.append(f'跳过（{reason}）: {dup[0]}')
+            else:
+                errors.append(f'连不上（跳过）: {dup[0]} ({e})')
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except OSError:
+                pass
+            continue
+        st_keep = os.stat(keep[0])
+        st_dup = os.stat(dup[0])
+        ok_inode = (st_dup.st_ino == st_keep.st_ino and st_dup.st_dev == st_keep.st_dev)
+        ok_hash = True
+        if VERIFY:
+            ok_hash = (sha256(dup[0]) == h)
+        if ok_inode and ok_hash:
+            saved += size
+            linked.append((dup[0], keep[0], size, 'linked'))
+        else:
+            errors.append(f'连完校验不一致: {dup[0]}（inode={ok_inode} hash={ok_hash}）')
+
+# ---------- 4. 输出 ----------
+if AS_JSON:
+    print(json.dumps({'mode': MODE, 'groups': len(groups), 'saved_bytes': saved,
+                      'files': [{'dup': d, 'kept': k, 'size': s, 'state': st} for d, k, s, st in linked],
+                      'errors': errors}, ensure_ascii=False, indent=1))
+    sys.exit(0)
+
+if not groups:
+    print('✅ 没发现重复内容（没有可省的）')
+    for e in errors:
+        print(f'   ⚠️ {e}')
+    sys.exit(0)
+
+verb = '已连接' if MODE == 'apply' else '可省'
+print(f'发现 {len(groups)} 组重复内容，{len(linked)} 个文件{"已连接" if MODE=="apply" else "可省"} {human(saved)}')
+print()
+for dup, keep, size, st in linked:
+    tag = '✅' if st == 'linked' else '·'
+    print(f'  {tag} {human(size):>9}  {dup}')
+    print(f'             ↳ 与 {keep}')
+if errors:
+    print()
+    for e in errors:
+        print(f'  ⚠️ {e}')
+if MODE != 'apply':
+    print()
+    print(f'只是扫描，没有改动任何文件。要真的连，加 --apply（建议先加 --verify）。')
+PY
