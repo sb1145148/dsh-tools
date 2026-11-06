@@ -1,3 +1,3 @@
-*.tar.gz
-*.log
-.DS_Store
+﻿# 生成物（由 windows/patch-dsh-tools.py 产出）
+windows/bin/
+windows/shim/
