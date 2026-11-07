@@ -861,4 +861,4 @@ home/          shell 配置和笔记
 
 ## 📄 License
 
-MIT
+MIT([LICENSE](LICENSE))
