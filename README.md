@@ -1,4 +1,4 @@
-# dsh-tools
+# dsh-tools (暂停维护/已知可用版本:DSHA v0.2.1-rc2)
 
 两个命令，给 DSHA 做**能真的恢复回来**的备份。
 
