@@ -1,5 +1,20 @@
 # dsh-tools
 
+> **Status: unmaintained (2026-11-12)** — This repository is no longer actively updated. Issues and PRs may go unanswered.
+>
+> | | |
+> | --- | --- |
+> | **Last version** | `2.3.0` |
+> | **Known working** | DSHA **v0.2.1-rc.2** (Android) · Windows desktop 0.2.2-rc.1 |
+> | **Not verified** | DSHA 0.2.2 and later — if the data layout changed, the scripts can **fail silently** |
+> | **Why** | Superseded by the PowerShell edition [dsh-backup-tools](https://github.com/sb1145148/dsh-backup-tools) (same coverage, native Windows) |
+> | **Want the current tool** | [dsh-backup-tools](https://github.com/sb1145148/dsh-backup-tools) |
+>
+> Code and docs are kept as-is for users of older versions.
+> **Backups are your responsibility** — verify a restore before trusting an unmaintained script.
+
+---
+
 Two commands that give [DSHA](https://github.com/) a backup you can **actually restore**.
 
 ```bash

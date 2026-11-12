@@ -1,5 +1,20 @@
 # dsh-tools (暂停维护/已知可用版本:DSHA v0.2.1-rc2)
 
+> **状态：暂停维护（2026-11-12）** —— 本仓库不再主动更新，Issue 和 PR 可能不会回复。
+>
+> | | |
+> | --- | --- |
+> | **最后版本** | `2.3.0` |
+> | **已知可用** | DSHA **v0.2.1-rc.2**（Android）· Windows 桌面 0.2.2-rc.1 |
+> | **未验证** | DSHA 0.2.2 及以后 —— 数据目录结构若有变化，脚本可能**静默失效** |
+> | **为什么要停** | 作者已转用 PowerShell 版 [dsh-backup-tools](https://github.com/sb1145148/dsh-backup-tools)：功能覆盖，且原生适配 Windows |
+> | **想要新工具** | 去 [dsh-backup-tools](https://github.com/sb1145148/dsh-backup-tools) |
+>
+> 代码和文档原样保留，供旧版本用户与考古使用。
+> **备份是自己的事** —— 用停更的脚本请自行验证还原是否成功。
+
+---
+
 两个命令，给 DSHA 做**能真的恢复回来**的备份。
 
 ```bash
@@ -737,8 +752,7 @@ sessions/
       session.v4.jsonl.zstd
 ```
 
-**harness 会用 header 里的 `id` + `cwd` 反推「这个会话应该在的路径」，
-再和实际路径比对。对不上就判 `corrupt`，然后——**
+**harness 会用 header 里的 `id` + `cwd` 反推「这个会话应该在的路径」，再和实际路径比对。对不上就判 `corrupt`，然后——**
 
 ```
 WorkspaceRegistry 加载失败
